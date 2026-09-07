@@ -143,9 +143,9 @@ test("long-message continuation reconstructs exact content", (t) => {
   const long = "x".repeat(9500);
   writeFileSync(file, meta() + msg("first") + msg(long) + msg("last"));
   history.index(root);
-  let next: { after: number; char_offset: number } | null = {
+  let next: { after: number; byte_offset: number; revision?: string } | null = {
     after: -1,
-    char_offset: 0,
+    byte_offset: 0,
   };
   const collected: string[] = [];
   while (next) {
@@ -160,7 +160,7 @@ test("long-message continuation reconstructs exact content", (t) => {
     () => history.messages({ session_id: "absent" }),
     /Unknown session/,
   );
-  assert.throws(() => history.messages({ session_id: "s1", char_offset: 999 }));
+  assert.throws(() => history.messages({ session_id: "s1", byte_offset: 999 }));
 });
 
 test("MCP client discovers four read-only tools and retrieves indexed evidence", async (t) => {

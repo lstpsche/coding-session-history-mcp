@@ -18,7 +18,13 @@ async function main() {
       until: { type: "string" },
       limit: { type: "string" },
       after: { type: "string" },
-      "char-offset": { type: "string" },
+      "byte-offset": { type: "string" },
+      revision: { type: "string" },
+      "message-id": { type: "string" },
+      before: { type: "string" },
+      through: { type: "string" },
+      offset: { type: "string" },
+      "corpus-revision": { type: "string" },
       port: { type: "string" },
       http: { type: "boolean" },
       help: { type: "boolean" },
@@ -27,14 +33,20 @@ async function main() {
   const [command, argument] = positionals;
   if (values.help || !command) {
     console.log(
-      "coding-session-history index|status|search <query>|sessions|show <id>|serve [--http]\nOptions: --source <Codex home> --db <path> --repo <exact cwd> --since <ISO timestamp> --until <ISO timestamp> --limit <n> --after <message id> --char-offset <n> --port <n>\nHTTP requires CSH_TOKEN (at least 32 characters) and binds to 127.0.0.1. Run index explicitly to refresh.",
+      "coding-session-history index|status|search <query>|sessions|show <id>|messages <id>|serve [--http]\nOptions: --source <Codex home> --db <path> --repo <exact cwd> --since <ISO timestamp> --until <ISO timestamp> --limit <n> --after <message id> --revision <id> --message-id <n> --before <n> --through <n> --byte-offset <n> --offset <n> --corpus-revision <id> --port <n>\nHTTP requires CSH_TOKEN (at least 32 characters) and binds to 127.0.0.1. Run index explicitly to refresh.",
     );
     return;
   }
   if (
-    !["index", "status", "search", "sessions", "show", "serve"].includes(
-      command,
-    )
+    ![
+      "index",
+      "status",
+      "search",
+      "sessions",
+      "show",
+      "messages",
+      "serve",
+    ].includes(command)
   )
     throw new Error(`Unknown command: ${command}`);
   const history = new History(
@@ -42,8 +54,12 @@ async function main() {
       join(homedir(), ".local/share/coding-session-history-mcp/index.sqlite"),
     { readonly: command !== "index" },
   );
+  const number = (value: string | undefined) =>
+    value === undefined ? undefined : Number(value);
   const input = {
     repo: values.repo,
+    offset: number(values.offset),
+    corpus_revision: values["corpus-revision"],
     since: values.since,
     until: values.until,
     limit: values.limit === undefined ? undefined : Number(values.limit),
@@ -67,14 +83,21 @@ async function main() {
         output = history.list(input);
         break;
       case "show":
+        output = history.overview({
+          session_id: argument,
+          revision: values.revision,
+        });
+        break;
+      case "messages":
         output = history.messages({
           session_id: argument,
           limit: input.limit,
           after: values.after === undefined ? undefined : Number(values.after),
-          char_offset:
-            values["char-offset"] === undefined
-              ? undefined
-              : Number(values["char-offset"]),
+          revision: values.revision,
+          message_id: number(values["message-id"]),
+          before: number(values.before),
+          through: number(values.through),
+          byte_offset: number(values["byte-offset"]),
         });
         break;
       case "serve": {
@@ -109,7 +132,7 @@ async function main() {
         return;
       }
     }
-    console.log(JSON.stringify(output, null, 2));
+    console.log(JSON.stringify(output));
   } finally {
     if (!serving) history.close();
   }

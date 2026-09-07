@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const PARSER_VERSION = 2;
+export const PARSER_VERSION = 3;
 
 const envelope = z.object({
   timestamp: z.iso.datetime({ offset: true }),
@@ -8,13 +8,34 @@ const envelope = z.object({
   payload: z.record(z.string(), z.unknown()),
 });
 const metadata = z.object({
-  id: z.string().min(1).max(200),
-  cwd: z.string().max(4096),
+  id: z
+    .string()
+    .min(1)
+    .max(200)
+    .refine(
+      (value) => value.isWellFormed(),
+      "Session ID must be valid Unicode",
+    ),
+  cwd: z
+    .string()
+    .max(4096)
+    .refine((value) => value.isWellFormed(), "cwd must be valid Unicode"),
 });
 const message = z.object({
   type: z.literal("message"),
   role: z.enum(["user", "assistant"]),
-  content: z.array(z.object({ type: z.string(), text: z.string().optional() })),
+  content: z.array(
+    z.object({
+      type: z.string(),
+      text: z
+        .string()
+        .refine(
+          (value) => value.isWellFormed(),
+          "Text must contain valid Unicode scalar values",
+        )
+        .optional(),
+    }),
+  ),
 });
 type Normalized =
   | { kind: "session"; id: string; cwd: string; timestamp: string }

@@ -20,6 +20,7 @@ const caseSchema = z.object({
 });
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const hitSchema = z.object({
+  revision: z.string(),
   session_id: z.string(),
   message_id: z.number().int(),
 });
@@ -31,7 +32,15 @@ const pageSchema = z.object({
       truncated: z.boolean(),
     }),
   ),
-  next: z.object({ after: z.number(), char_offset: z.number() }).nullable(),
+  next: z
+    .object({
+      session_id: z.string(),
+      revision: z.string(),
+      after: z.number(),
+      byte_offset: z.number(),
+      through: z.number().optional(),
+    })
+    .nullable(),
 });
 function distribution(values: number[]) {
   const sorted = [...values].sort((a, b) => a - b);
@@ -118,12 +127,18 @@ function main() {
       );
       let expansionMatches = false;
       if (index !== -1) {
-        let cursor = { after: item.expected.message_id - 1, char_offset: 0 };
+        let cursor: {
+          message_id?: number;
+          after?: number;
+          byte_offset?: number;
+          through?: number;
+        } = { message_id: item.expected.message_id };
         let text = "";
         while (true) {
           const page = pageSchema.parse(
             history.messages({
               session_id: item.expected.session_id,
+              revision: hits[index]!.revision,
               ...cursor,
               limit: 1,
             }),
@@ -133,7 +148,7 @@ function main() {
             throw new Error(`Expansion lost expected message for ${item.id}`);
           text += message.text;
           if (!message.truncated) break;
-          if (!page.next || page.next.char_offset <= cursor.char_offset)
+          if (!page.next || page.next.byte_offset <= (cursor.byte_offset ?? 0))
             throw new Error(`Expansion did not advance for ${item.id}`);
           cursor = page.next;
         }

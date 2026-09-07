@@ -55,7 +55,11 @@ test(
         results: z
           .array(
             z
-              .object({ session_id: z.string(), message_id: z.number() })
+              .object({
+                session_id: z.string(),
+                message_id: z.number(),
+                revision: z.string(),
+              })
               .passthrough(),
           )
           .nonempty(),
@@ -69,7 +73,7 @@ test(
         .parse(JSON.parse((await run("sessions")).stdout)).sessions.length,
       2,
     );
-    assert.match((await run("show", "fixture-current")).stdout, /Привет/);
+    assert.match((await run("messages", "fixture-current")).stdout, /Привет/);
 
     const transport = new StdioClientTransport({
       command: process.execPath,
@@ -111,7 +115,8 @@ test(
           name: "codex_get_messages",
           arguments: {
             session_id: search.results[0]!.session_id,
-            after: search.results[0]!.message_id - 1,
+            message_id: search.results[0]!.message_id,
+            revision: search.results[0]!.revision,
             limit: 1,
           },
         }),
@@ -123,7 +128,8 @@ test(
           arguments: { session_id: "fixture-archived" },
         }),
       );
-      assert.match(JSON.stringify(overview), /top margin/);
+      assert.match(JSON.stringify(overview), /message_count/);
+      assert.doesNotMatch(JSON.stringify(overview), /top margin/);
       const sessions = payload(
         await client.callTool({
           name: "codex_list_sessions",

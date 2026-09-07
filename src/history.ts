@@ -13,10 +13,11 @@ import {
   type Stats,
 } from "node:fs";
 import { dirname, join, resolve, relative, isAbsolute } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { TextDecoder } from "node:util";
 import { z } from "zod";
 import { normalize, PARSER_VERSION } from "./parser.js";
+import { boundedPage, boundedResult } from "./response.js";
 
 const MAX_LINE = 16 * 1024 * 1024;
 const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -31,6 +32,8 @@ const filters = z.object({
 export const searchInput = filters.extend({
   query: z.string().trim().min(1).max(500),
   limit: z.number().int().min(1).max(20).default(10),
+  offset: z.number().int().min(0).default(0),
+  corpus_revision: z.uuid().optional(),
   roles: z
     .array(z.enum(["user", "assistant"]))
     .min(1)
@@ -39,13 +42,22 @@ export const searchInput = filters.extend({
 export const listInput = filters.extend({
   limit: z.number().int().min(1).max(50).default(20),
   offset: z.number().int().min(0).default(0),
+  corpus_revision: z.uuid().optional(),
 });
-export const messagesInput = z.object({
+export const sessionInput = z.object({
   session_id: z.string().min(1).max(200),
-  after: z.number().int().min(-1).default(-1),
-  limit: z.number().int().min(1).max(20).default(10),
-  char_offset: z.number().int().min(0).default(0),
+  revision: z.uuid().optional(),
 });
+export const messagesInput = sessionInput
+  .extend({
+    after: z.number().int().min(-1).default(-1),
+    message_id: z.number().int().min(0).optional(),
+    before: z.number().int().min(0).max(10).default(0),
+    through: z.number().int().min(0).optional(),
+    limit: z.number().int().min(1).max(20).default(10),
+    byte_offset: z.number().int().min(0).default(0),
+  })
+  .strict();
 type FileState = {
   path: string;
   offset: number;
@@ -55,15 +67,24 @@ type FileState = {
   identity: string;
   session_id: string;
   anchor: string;
+  digest: string;
 };
+type Session = {
+  id: string;
+  cwd: string;
+  started_at: string;
+  updated_at: string;
+  revision: string;
+};
+type Removed = { revision: string; offset: number; digest: string };
 type Message = {
   sequence: number;
   role: string;
-  text: string;
   timestamp: string;
+  bytes: number;
 };
-
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
+const EMPTY_DIGEST = createHash("sha256").digest("hex");
 
 function fingerprint(stat: Stats) {
   return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
@@ -155,9 +176,9 @@ export class History {
           throw new Error("Unrecognized database; choose a new --db path");
         this.db.transaction(() => {
           this.db.exec(`
-      CREATE TABLE source(root TEXT NOT NULL, indexed_at TEXT, collections TEXT NOT NULL);
-      CREATE TABLE sessions(id TEXT PRIMARY KEY, cwd TEXT NOT NULL, started_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE files(path TEXT PRIMARY KEY, offset INTEGER NOT NULL, size INTEGER NOT NULL, mtime REAL NOT NULL, ctime REAL NOT NULL, identity TEXT NOT NULL, session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE, anchor TEXT NOT NULL);
+      CREATE TABLE source(root TEXT NOT NULL, indexed_at TEXT, collections TEXT NOT NULL, revision TEXT NOT NULL);
+      CREATE TABLE sessions(id TEXT PRIMARY KEY, cwd TEXT NOT NULL, started_at TEXT NOT NULL, updated_at TEXT NOT NULL, revision TEXT NOT NULL);
+      CREATE TABLE files(path TEXT PRIMARY KEY, offset INTEGER NOT NULL, size INTEGER NOT NULL, mtime REAL NOT NULL, ctime REAL NOT NULL, identity TEXT NOT NULL, session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE, anchor TEXT NOT NULL, digest TEXT NOT NULL);
       CREATE TABLE messages(id INTEGER PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, sequence INTEGER NOT NULL, timestamp TEXT NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL, UNIQUE(session_id, sequence));
       CREATE VIRTUAL TABLE messages_fts USING fts5(text, content='messages', content_rowid='id');
       CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN INSERT INTO messages_fts(rowid,text) VALUES(new.id,new.text); END;
@@ -217,35 +238,54 @@ export class History {
           }
         } else
           this.db
-            .prepare("INSERT INTO source(root,collections) VALUES(?,?)")
-            .run(root, JSON.stringify(observation.collections));
+            .prepare(
+              "INSERT INTO source(root,collections,revision) VALUES(?,?,?)",
+            )
+            .run(root, JSON.stringify(observation.collections), randomUUID());
         const current = new Set(paths);
+        const removed = new Map<string, Removed>();
         for (const row of this.db
           .prepare("SELECT * FROM files")
           .all() as FileState[]) {
-          if (!current.has(row.path))
+          if (!current.has(row.path)) {
+            const session = this.db
+              .prepare("SELECT revision FROM sessions WHERE id=?")
+              .get(row.session_id) as { revision: string };
+            removed.set(row.session_id, {
+              revision: session.revision,
+              offset: row.offset,
+              digest: row.digest,
+            });
             this.db
               .prepare("DELETE FROM sessions WHERE id=?")
               .run(row.session_id);
+          }
         }
         for (const path of paths.sort())
-          if (this.ingest(path, root, observation.files.get(path)!)) changed++;
+          if (this.ingest(path, root, observation.files.get(path)!, removed))
+            changed++;
         if (observe(root).signature !== observation.signature)
           throw new Error(
             "History source changed during indexing; retry index",
           );
         this.db
-          .prepare("UPDATE source SET indexed_at=?, collections=?")
+          .prepare("UPDATE source SET indexed_at=?, collections=?, revision=?")
           .run(
             new Date().toISOString(),
             JSON.stringify(observation.collections),
+            randomUUID(),
           );
       })
       .immediate();
     return { files: paths.length, changed, ...this.status() };
   }
 
-  private ingest(path: string, root: string, observed: string): boolean {
+  private ingest(
+    path: string,
+    root: string,
+    observed: string,
+    removed: Map<string, Removed>,
+  ): boolean {
     const rel = relative(root, realpathSync(path));
     if (rel.startsWith("..") || isAbsolute(rel))
       throw new Error("Source escaped configured root");
@@ -286,6 +326,8 @@ export class History {
         this.db.prepare("DELETE FROM sessions WHERE id=?").run(old.session_id);
       let offset = append ? old.offset : 0;
       let sessionId = append ? old.session_id : undefined;
+      let digest = append ? old.digest : EMPTY_DIGEST;
+      let moved: Removed | undefined;
       let pending: Buffer = Buffer.alloc(0);
       let position = offset;
       const chunk = Buffer.alloc(64 * 1024);
@@ -308,6 +350,11 @@ export class History {
               `Rollout record exceeds ${MAX_LINE} bytes: ${path}`,
             );
           const line = pending.subarray(0, newline);
+          digest = createHash("sha256")
+            .update(digest)
+            .update(line)
+            .update("\n")
+            .digest("hex");
           const sequence = offset;
           offset += newline + 1;
           pending = pending.subarray(newline + 1);
@@ -319,6 +366,15 @@ export class History {
               cause,
             });
           }
+          if (
+            sessionId &&
+            moved &&
+            offset === moved.offset &&
+            digest === moved.digest
+          )
+            this.db
+              .prepare("UPDATE sessions SET revision=? WHERE id=?")
+              .run(moved.revision, sessionId);
           if (event.kind === "session") {
             if (sessionId) {
               const session = this.db
@@ -342,9 +398,18 @@ export class History {
                 `Duplicate session ID in source: ${path}; keep only one rollout copy`,
               );
             sessionId = event.id;
+            moved = removed.get(sessionId);
             this.db
-              .prepare("INSERT INTO sessions VALUES(?,?,?,?)")
-              .run(sessionId, event.cwd, event.timestamp, event.timestamp);
+              .prepare("INSERT INTO sessions VALUES(?,?,?,?,?)")
+              .run(
+                sessionId,
+                event.cwd,
+                event.timestamp,
+                event.timestamp,
+                moved && moved.offset === offset && moved.digest === digest
+                  ? moved.revision
+                  : randomUUID(),
+              );
           } else if (!sessionId)
             throw new Error(
               `Rollout does not begin with session metadata: ${path}`,
@@ -379,7 +444,7 @@ export class History {
         throw new Error(`Missing session metadata: ${path}`);
       }
       this.db
-        .prepare("INSERT OR REPLACE INTO files VALUES(?,?,?,?,?,?,?,?)")
+        .prepare("INSERT OR REPLACE INTO files VALUES(?,?,?,?,?,?,?,?,?)")
         .run(
           path,
           offset,
@@ -389,6 +454,7 @@ export class History {
           identity,
           sessionId,
           anchor(offset),
+          digest,
         );
       return true;
     } finally {
@@ -442,8 +508,40 @@ export class History {
       values,
     };
   }
+  private observation(expected?: string) {
+    const row = this.db
+      .prepare("SELECT indexed_at,revision FROM source")
+      .get() as { indexed_at: string | null; revision: string } | undefined;
+    if (!row?.indexed_at)
+      throw new Error(
+        "Index is not ready; run index successfully before retrieving history",
+      );
+    if (expected && expected !== row.revision)
+      throw new Error(
+        "Stale corpus reference; repeat the search or session list",
+      );
+    return {
+      ready: true as const,
+      indexed_at: row.indexed_at,
+      revision: row.revision,
+    };
+  }
+  private session(id: string, revision?: string) {
+    const session = this.db
+      .prepare("SELECT * FROM sessions WHERE id=?")
+      .get(id) as Session | undefined;
+    if (!session)
+      throw new Error(
+        revision ? "Stale session reference; search again" : "Unknown session",
+      );
+    if (revision && revision !== session.revision)
+      throw new Error("Stale session reference; search again");
+    return session;
+  }
   search(raw: unknown) {
     const input = searchInput.parse(raw);
+    if (input.offset && !input.corpus_revision)
+      throw new Error("Search continuation requires corpus_revision");
     const terms = input.query.match(/[\p{L}\p{N}_]+/gu);
     if (!terms?.length)
       throw new Error("Search query must contain letters or numbers");
@@ -453,82 +551,239 @@ export class History {
       filter.sql += ` AND m.role IN (${input.roles.map(() => "?").join(",")})`;
       filter.values.push(...input.roles);
     }
-    return {
-      results: this.db
+    return this.db.transaction(() => {
+      const observation = this.observation(input.corpus_revision);
+      const rows = this.db
         .prepare(
-          `SELECT s.id AS session_id,s.cwd AS repo,m.sequence AS message_id,m.timestamp,m.role,bm25(messages_fts) AS score,snippet(messages_fts,0,'[',']','…',32) AS snippet FROM messages_fts JOIN messages m ON m.id=messages_fts.rowid JOIN sessions s ON s.id=m.session_id WHERE messages_fts MATCH ? ${filter.sql} ORDER BY score,s.id,m.sequence LIMIT ?`,
+          `SELECT s.id AS session_id,s.cwd AS repo,s.revision,m.sequence AS message_id,m.timestamp,m.role,bm25(messages_fts) AS score,substr(CAST(snippet(messages_fts,0,'[',']','…',32) AS BLOB),1,4001) AS excerpt FROM messages_fts JOIN messages m ON m.id=messages_fts.rowid JOIN sessions s ON s.id=m.session_id WHERE messages_fts MATCH ? ${filter.sql} ORDER BY score,s.id,m.sequence LIMIT ? OFFSET ?`,
         )
-        .all(query, ...filter.values, input.limit)
-        .map((row) => {
-          const result = row as { snippet: string };
-          return { ...result, snippet: result.snippet.slice(0, 1500) };
-        }),
-      content_trust: "untrusted historical text",
-    };
+        .all(query, ...filter.values, input.limit + 1, input.offset) as Array<{
+        session_id: string;
+        repo: string;
+        revision: string;
+        message_id: number;
+        timestamp: string;
+        role: string;
+        score: number;
+        excerpt: Buffer;
+      }>;
+      function* entries() {
+        for (let i = 0; i < Math.min(rows.length, input.limit); i++) {
+          const { excerpt, ...row } = rows[i]!;
+          const snippet = new TextDecoder("utf-8", {
+            fatal: true,
+            ignoreBOM: true,
+          }).decode(excerpt.subarray(0, 4000), { stream: true });
+          yield {
+            value: {
+              ...row,
+              snippet,
+              snippet_truncated: excerpt.length > Buffer.byteLength(snippet),
+              reference: {
+                session_id: row.session_id,
+                revision: row.revision,
+                message_id: row.message_id,
+              },
+            },
+            next:
+              i + 1 < rows.length
+                ? {
+                    offset: input.offset + i + 1,
+                    corpus_revision: observation.revision,
+                  }
+                : null,
+          };
+        }
+      }
+      return boundedPage(entries(), (results, next) => ({
+        results,
+        next,
+        observation,
+        content_trust: "untrusted historical text",
+      }));
+    })();
   }
   list(raw: unknown) {
     const input = listInput.parse(raw);
+    if (input.offset && !input.corpus_revision)
+      throw new Error("Session-list continuation requires corpus_revision");
     const filter = this.where(input, "s.updated_at");
-    const rows = this.db
-      .prepare(
-        `SELECT s.* FROM sessions s WHERE 1=1 ${filter.sql} ORDER BY s.updated_at DESC,s.id LIMIT ? OFFSET ?`,
-      )
-      .all(...filter.values, input.limit + 1, input.offset);
-    return {
-      sessions: rows.slice(0, input.limit),
-      next_offset:
-        rows.length > input.limit ? input.offset + input.limit : null,
-    };
+    return this.db.transaction(() => {
+      const observation = this.observation(input.corpus_revision);
+      const rows = this.db
+        .prepare(
+          `SELECT s.* FROM sessions s WHERE 1=1 ${filter.sql} ORDER BY s.updated_at DESC,s.id LIMIT ? OFFSET ?`,
+        )
+        .all(...filter.values, input.limit + 1, input.offset) as Session[];
+      function* entries() {
+        for (let i = 0; i < Math.min(rows.length, input.limit); i++)
+          yield {
+            value: rows[i]!,
+            next:
+              i + 1 < rows.length
+                ? {
+                    offset: input.offset + i + 1,
+                    corpus_revision: observation.revision,
+                  }
+                : null,
+          };
+      }
+      return boundedPage(entries(), (sessions, next) => ({
+        sessions,
+        next,
+        observation,
+        content_trust: "untrusted historical text",
+      }));
+    })();
+  }
+  overview(raw: unknown) {
+    const input = sessionInput.parse(raw);
+    return this.db.transaction(() => {
+      const observation = this.observation();
+      const session = this.session(input.session_id, input.revision);
+      const counts = this.db
+        .prepare(
+          "SELECT COUNT(*) AS message_count,MIN(sequence) AS first_message_id,MAX(sequence) AS last_message_id FROM messages WHERE session_id=?",
+        )
+        .get(session.id) as {
+        message_count: number;
+        first_message_id: number | null;
+        last_message_id: number | null;
+      };
+      return boundedResult({
+        session,
+        ...counts,
+        observation,
+        next: counts.message_count
+          ? {
+              session_id: session.id,
+              revision: session.revision,
+              after: -1,
+              byte_offset: 0,
+            }
+          : null,
+        content_trust: "untrusted historical text",
+      });
+    })();
   }
   messages(raw: unknown) {
     const input = messagesInput.parse(raw);
-    const session = this.db
-      .prepare("SELECT * FROM sessions WHERE id=?")
-      .get(input.session_id);
-    if (!session) throw new Error(`Unknown session: ${input.session_id}`);
-    const rows = this.db
-      .prepare(
-        "SELECT sequence,role,timestamp,text FROM messages WHERE session_id=? AND sequence>? ORDER BY sequence LIMIT ?",
-      )
-      .all(input.session_id, input.after, input.limit + 1) as Message[];
     if (
-      input.char_offset &&
-      (!rows[0] || input.char_offset >= rows[0].text.length)
+      (input.after >= 0 ||
+        input.message_id !== undefined ||
+        input.byte_offset ||
+        input.through !== undefined) &&
+      !input.revision
     )
-      throw new Error("char_offset is outside the next message");
-    const result: object[] = [];
-    let next: { after: number; char_offset: number } | null = null;
-    for (const row of rows.slice(0, input.limit)) {
-      const start = result.length === 0 ? input.char_offset : 0;
-      const end = Math.min(start + 4000, row.text.length);
-      result.push({
-        ...row,
-        message_id: row.sequence,
-        text: row.text.slice(start, end),
-        char_offset: start,
-        truncated: end < row.text.length,
-      });
-      if (end < row.text.length) {
-        next = {
-          after:
-            result.length === 1
-              ? input.after
-              : (rows[result.length - 2] as Message).sequence,
-          char_offset: end,
-        };
-        break;
+      throw new Error(
+        "Message reference or continuation requires revision; search or get_session first",
+      );
+    if (
+      input.message_id !== undefined &&
+      (input.after !== -1 || input.byte_offset || input.through !== undefined)
+    )
+      throw new Error("message_id cannot be combined with continuation fields");
+    if (
+      input.before &&
+      (input.message_id === undefined || input.before >= input.limit)
+    )
+      throw new Error("before requires message_id and must be less than limit");
+    return this.db.transaction(() => {
+      const observation = this.observation();
+      const session = this.session(input.session_id, input.revision);
+      let after = input.after;
+      let through = input.through;
+      if (input.message_id !== undefined) {
+        if (
+          !this.db
+            .prepare("SELECT 1 FROM messages WHERE session_id=? AND sequence=?")
+            .get(session.id, input.message_id)
+        )
+          throw new Error("Unknown message reference; search again");
+        const preceding = this.db
+          .prepare(
+            "SELECT sequence FROM messages WHERE session_id=? AND sequence<? ORDER BY sequence DESC LIMIT ?",
+          )
+          .all(session.id, input.message_id, input.before) as Array<{
+          sequence: number;
+        }>;
+        after = (preceding.at(-1)?.sequence ?? input.message_id) - 1;
       }
-    }
-    if (!next && rows.length > input.limit)
-      next = {
-        after: (rows[input.limit - 1] as Message).sequence,
-        char_offset: 0,
-      };
-    return {
-      session,
-      messages: result,
-      next,
-      content_trust: "untrusted historical text",
-    };
+      if (through !== undefined && through <= after)
+        throw new Error("through must follow after");
+      const rows = this.db
+        .prepare(
+          `SELECT sequence,role,timestamp,length(CAST(text AS BLOB)) AS bytes FROM messages WHERE session_id=? AND sequence>? ${through === undefined ? "" : "AND sequence<=?"} ORDER BY sequence LIMIT ?`,
+        )
+        .all(
+          session.id,
+          after,
+          ...(through === undefined ? [] : [through]),
+          input.limit + 1,
+        ) as Message[];
+      if (input.message_id !== undefined) {
+        rows.splice(input.limit);
+        through = rows.at(-1)!.sequence;
+      }
+      if (input.byte_offset && (!rows[0] || input.byte_offset >= rows[0].bytes))
+        throw new Error("byte_offset is outside the next message");
+      const db = this.db;
+      function* entries() {
+        for (let i = 0; i < Math.min(rows.length, input.limit); i++) {
+          const row = rows[i]!;
+          const start = i === 0 ? input.byte_offset : 0;
+          const part = db
+            .prepare(
+              "SELECT substr(CAST(text AS BLOB),?,4000) AS bytes FROM messages WHERE session_id=? AND sequence=?",
+            )
+            .get(start + 1, session.id, row.sequence) as { bytes: Buffer };
+          const text = new TextDecoder("utf-8", {
+            fatal: true,
+            ignoreBOM: true,
+          }).decode(part.bytes, { stream: true });
+          const end = start + Buffer.byteLength(text);
+          if (end <= start) throw new Error("Invalid UTF-8 message boundary");
+          const truncated = end < row.bytes;
+          const next =
+            truncated || i + 1 < rows.length
+              ? {
+                  session_id: session.id,
+                  revision: session.revision,
+                  after: truncated
+                    ? i === 0
+                      ? after
+                      : rows[i - 1]!.sequence
+                    : row.sequence,
+                  byte_offset: truncated ? end : 0,
+                  ...(through === undefined ? {} : { through }),
+                }
+              : null;
+          yield {
+            value: {
+              message_id: row.sequence,
+              role: row.role,
+              timestamp: row.timestamp,
+              text,
+              byte_offset: start,
+              truncated,
+              reference: {
+                session_id: session.id,
+                revision: session.revision,
+                message_id: row.sequence,
+              },
+            },
+            next,
+          };
+          if (truncated) return;
+        }
+      }
+      return boundedPage(entries(), (messages, next) => ({
+        session,
+        messages,
+        next,
+        observation,
+        content_trust: "untrusted historical text",
+      }));
+    })();
   }
 }

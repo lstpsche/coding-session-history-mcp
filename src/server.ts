@@ -2,7 +2,13 @@ import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createServer } from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import { History, searchInput, listInput, messagesInput } from "./history.js";
+import {
+  History,
+  searchInput,
+  listInput,
+  messagesInput,
+  sessionInput,
+} from "./history.js";
 
 export function makeServer(history: History) {
   const server = new McpServer(
@@ -25,7 +31,7 @@ export function makeServer(history: History) {
     "codex_search",
     {
       description:
-        "Search indexed user/assistant text using all query terms. repo is an exact recorded cwd. Results include message IDs for expansion.",
+        "Search indexed user/assistant text using all query terms. repo is an exact recorded cwd. Results include direct revision-bound references for expansion and next for continuation. Every result reports the indexed observation.",
       inputSchema: searchInput,
       annotations,
     },
@@ -45,17 +51,17 @@ export function makeServer(history: History) {
     "codex_get_session",
     {
       description:
-        "Get session metadata and a bounded page of messages. Pass next fields to continue.",
-      inputSchema: messagesInput,
+        "Get session metadata, message count and first/last IDs. Use next with codex_get_messages to start reading. revision optionally checks a known session reference.",
+      inputSchema: sessionInput,
       annotations,
     },
-    (input) => result(history.messages(input)),
+    (input) => result(history.overview(input)),
   );
   server.registerTool(
     "codex_get_messages",
     {
       description:
-        "Expand messages after a byte-position message ID. To include a search hit use after=message_id-1. Pass returned next fields unchanged to continue long messages.",
+        "Expand a search reference by passing session_id, revision and message_id directly. before adds up to 10 preceding messages within limit. Pass next unchanged to continue, including long UTF-8 messages. Stale references require a new search.",
       inputSchema: messagesInput,
       annotations,
     },

@@ -91,7 +91,12 @@ test("read connections neither create a missing index nor write to an existing o
   }
 });
 
-for (const incompatible of ["old schema", "future schema", "parser"] as const) {
+for (const incompatible of [
+  "old schema",
+  "previous schema",
+  "future schema",
+  "parser",
+] as const) {
   test(`${incompatible} incompatibility preserves persisted data and requires explicit rebuild`, (t) => {
     const { db } = fixture(t);
     const connection = new Database(db);
@@ -99,7 +104,7 @@ for (const incompatible of ["old schema", "future schema", "parser"] as const) {
       connection.exec("UPDATE index_format SET parser_version=999");
     else
       connection.pragma(
-        `user_version=${incompatible === "old schema" ? 1 : 999}`,
+        `user_version=${incompatible === "old schema" ? 1 : incompatible === "previous schema" ? 2 : 999}`,
       );
     connection.close();
     const before = readFileSync(db);
