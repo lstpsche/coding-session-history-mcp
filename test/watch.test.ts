@@ -41,6 +41,7 @@ test(
       [
         resolve("dist/cli.js"),
         "watch",
+        "--all",
         "--source",
         source,
         "--db",

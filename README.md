@@ -12,7 +12,7 @@ npm run check
 Run the CLI:
 
 ```sh
-node dist/cli.js index
+node dist/cli.js index --policy /absolute/path/history-policy.json
 node dist/cli.js status
 node dist/cli.js search "SQLite architecture"
 node dist/cli.js sessions --repo /absolute/recorded/working/directory
@@ -22,7 +22,7 @@ node dist/cli.js messages SESSION_ID --revision REVISION --message-id MESSAGE_ID
 
 `index` reads `CODEX_HOME`, or `~/.codex`, and maintains a separate database at `~/.local/share/coding-session-history-mcp/index.sqlite`. Override these with `--source` and `--db`. The source is never modified. One database belongs to exactly one source root. Database files are created with owner-only permissions. Only `index` initializes storage. `status`, `search`, `sessions`, `show`, `messages`, and `serve` open an existing database read-only; a missing index is an error.
 
-Schema version 4 and parser version 3 are checked on every open. Incompatible indexes are rejected without replacing their data. To rebuild, run `index --source <source> --db <new-path>` with a new database path, verify the result, then configure retrieval with that path. A failed rebuild leaves the previous database intact. There is no automatic migration or in-place destructive rebuild.
+Schema version 5 and parser version 3 are checked on every open. Incompatible indexes are rejected without replacing their data. To rebuild, run `index --policy <policy-path> --source <source> --db <new-path>` with a new database path, verify the result, then configure retrieval with that path. A failed rebuild leaves the previous database intact. There is no automatic migration or in-place destructive rebuild.
 
 Run `index` again to refresh, or run `watch` in a separate process for periodic refreshes. `watch` starts one child writer at a time and waits 15 seconds between runs; `--interval-ms` accepts 100–300000 milliseconds. Retrieval stays in its own process. Stop the watcher with SIGINT or SIGTERM. Failed runs emit a diagnostic and retry at the next interval. The database admits one active writer, and a subsequent writer can recover an interrupted run once its owning process has exited. `status.refresh` reports `never`, `refreshing`, `failed`, or `ready`; failures include a content-free correlation ID. Content retrieval refuses failed or interrupted refreshes until a successful run. The last successful timestamp remains visible for diagnosis. A stopped watcher does not imply fresh data: inspect `indexed_at`. Unchanged files are skipped; appended files resume at the last committed newline. The whole reconciliation is transactional: malformed complete records or inaccessible sources fail the command without publishing partial updates. An unfinished trailing record waits for its newline. `status` reports the last successful indexing time and pending bytes for known sessions. Files with no complete metadata record are not yet indexed.
 
@@ -70,7 +70,17 @@ All content results fit within 64 KiB serialized as an MCP tool result, includin
 
 Only `response_item` user and assistant text is indexed. Duplicate event messages, system/developer instructions, reasoning, images, and tool calls/outputs are excluded. Unknown event types are ignored; malformed supported records fail indexing with a source byte position. Records larger than 16 MiB are rejected. Indexed text, session IDs and cwd must contain well-formed Unicode; lone surrogates are rejected rather than silently replaced by SQLite. The local rollout format is an external, evolving contract. Repeated metadata with the same session ID and cwd is accepted; the first header retains ownership and the start time. Conflicting IDs or cwd values, including inherited histories with mixed IDs, are rejected. Duplicate session IDs in separate files are rejected even when the files are identical: complete an archive move instead of keeping two copies. Legacy unwrapped records are explicitly unsupported because message timestamps and cwd are unavailable. Parser and JSON diagnostics include the source byte position and failure category without echoing record bodies. One such file aborts the entire reconciliation; do not assume a successful small sample qualifies the full history collection.
 
-History can still contain secrets and private data in ordinary messages. This implementation does not redact text or claim to detect secrets. Connecting an MCP client grants it access to the indexed user/assistant history. Returned text is explicitly identified as untrusted historical content and must not be treated as instructions.
+Indexing and watching require exactly one explicit local scope: `--policy /absolute/path/history-policy.json` or `--all`. A selected policy grants the union of exact recorded `cwd` values and session IDs. Empty selections expose nothing. For example:
+
+```json
+{"mode":"selected","cwds":["/absolute/project"],"sessions":[],"redact":["exact sensitive text"]}
+```
+
+An all-history policy is `{"mode":"all","redact":[]}`. Redaction replaces exact case-sensitive literal matches in message text with `[REDACTED]`, choosing the longest overlapping match. It does not scan for secrets, redact metadata, normalize Unicode, or support regular expressions. Review session IDs and working directories as well as text before sharing. Keep the policy owner-readable only because its literals may contain secrets. Up to 100 literals of 4096 characters each and a 1 MiB policy file are supported.
+
+Only selected sessions and redacted message text are indexed. Remote tool arguments cannot change this policy. A policy edit, invalid policy or missing policy blocks content retrieval until indexing succeeds; changes rebuild the selected corpus and invalidate old references. A failed rebuild leaves retrieval blocked. Removed text is inaccessible through the API, but this is not secure erasure of old SQLite pages, backups or prior client responses. `--all` deliberately replaces any previously selected policy when passed to a writer.
+
+Preview locally before connecting a client: run `index` with the chosen policy, inspect `status`, then `sessions` (continue its pagination until complete), `show` and `messages` for representative evidence. History can still contain secrets and private data in ordinary messages. Connecting an MCP client grants it access to the selected indexed user/assistant history. Returned text is explicitly identified as untrusted historical content and must not be treated as instructions.
 
 The parser is independent of storage and MCP. `src/parser.ts` owns Codex normalization; `src/history.ts` owns ingestion and retrieval; `src/response.ts` owns the shared serialized-result budget; `src/server.ts` owns the MCP contract and HTTP boundary; `src/cli.ts` owns local configuration. Tests exercise UTF-8 append boundaries, rollback, FTS reconciliation, archive movement, continuation, and actual MCP transport calls using synthetic data.
 
@@ -84,6 +94,6 @@ For a private benchmark, provide a fixed source snapshot and a JSON array of cas
 
 Use `tmp/` for private snapshots, benchmark cases and reports; it is excluded from Git. Never put actual conversations in test fixtures. `npm test` builds the CLI before exercising child-process transport tests.
 
-Session titles/model metadata, opt-in tool output, redaction, and remote-client setup remain future work. Embeddings and generated summaries are intentionally absent until retrieval evidence justifies them.
+Session titles/model metadata, opt-in tool output and remote-client setup remain future work. Embeddings and generated summaries are intentionally absent until retrieval evidence justifies them.
 
 This project is independent and is not affiliated with or endorsed by OpenAI.

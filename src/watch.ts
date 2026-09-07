@@ -7,6 +7,7 @@ export async function watch(
   db: string,
   interval: number,
   signal: AbortSignal,
+  policyPath: string | null,
 ) {
   if (!Number.isInteger(interval) || interval < 100 || interval > 300_000)
     throw new Error("interval-ms must be between 100 and 300000");
@@ -21,6 +22,7 @@ export async function watch(
           [
             fileURLToPath(new URL("cli.js", import.meta.url)),
             "index",
+            ...(policyPath === null ? ["--all"] : ["--policy", policyPath]),
             "--source",
             source,
             "--db",

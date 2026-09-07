@@ -1,3 +1,4 @@
+import { policy, allows, redact, type Policy } from "./policy.js";
 import Database from "better-sqlite3";
 import {
   constants,
@@ -83,7 +84,7 @@ type Message = {
   timestamp: string;
   bytes: number;
 };
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const EMPTY_DIGEST = createHash("sha256").digest("hex");
 
 function fingerprint(stat: Stats) {
@@ -183,6 +184,7 @@ export class History {
       CREATE VIRTUAL TABLE messages_fts USING fts5(text, content='messages', content_rowid='id');
       CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN INSERT INTO messages_fts(rowid,text) VALUES(new.id,new.text); END;
       CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN INSERT INTO messages_fts(messages_fts,rowid,text) VALUES('delete',old.id,old.text); END;
+      CREATE TABLE exposure(id INTEGER PRIMARY KEY CHECK(id=1), path TEXT, digest TEXT NOT NULL);
       CREATE TABLE refresh(id INTEGER PRIMARY KEY CHECK(id=1), state TEXT NOT NULL CHECK(state IN ('never','refreshing','ready','failed')), owner INTEGER, error_id TEXT);
       INSERT INTO refresh VALUES(1,'never',NULL,NULL);
       CREATE TABLE index_format(parser_version INTEGER NOT NULL);
@@ -221,7 +223,7 @@ export class History {
     };
   }
 
-  index(source: string) {
+  index(source: string, policyPath: string | null = null) {
     if (this.db.readonly)
       throw new Error("Cannot index through a read-only database connection");
     this.db
@@ -250,7 +252,7 @@ export class History {
       })
       .immediate();
     try {
-      const result = this.reconcile(source);
+      const result = this.reconcile(source, policy(policyPath));
       this.db
         .prepare(
           "UPDATE refresh SET state='ready',owner=NULL,error_id=NULL WHERE id=1",
@@ -272,7 +274,7 @@ export class History {
   }
 
   /** Reconcile the complete configured source set atomically, including moves and deletions. */
-  private reconcile(source: string) {
+  private reconcile(source: string, exposure: Policy) {
     const root = realpathSync(source);
     if (this.db.readonly)
       throw new Error("Cannot index through a read-only database connection");
@@ -304,6 +306,19 @@ export class History {
               "INSERT INTO source(root,collections,revision) VALUES(?,?,?)",
             )
             .run(root, JSON.stringify(observation.collections), randomUUID());
+        const previousPolicy = this.db
+          .prepare("SELECT path,digest FROM exposure WHERE id=1")
+          .get() as { path: string | null; digest: string } | undefined;
+        if (
+          !previousPolicy ||
+          previousPolicy.path !== exposure.path ||
+          previousPolicy.digest !== exposure.digest
+        ) {
+          this.db.prepare("DELETE FROM sessions").run();
+          this.db
+            .prepare("INSERT OR REPLACE INTO exposure VALUES(1,?,?)")
+            .run(exposure.path, exposure.digest);
+        }
         const current = new Set(paths);
         const removed = new Map<string, Removed>();
         for (const row of this.db
@@ -324,8 +339,18 @@ export class History {
           }
         }
         for (const path of paths.sort())
-          if (this.ingest(path, root, observation.files.get(path)!, removed))
+          if (
+            this.ingest(
+              path,
+              root,
+              observation.files.get(path)!,
+              removed,
+              exposure,
+            )
+          )
             changed++;
+        if (policy(exposure.path).digest !== exposure.digest)
+          throw new Error("Exposure policy changed during indexing; retry");
         if (observe(root).signature !== observation.signature)
           throw new Error(
             "History source changed during indexing; retry index",
@@ -347,6 +372,7 @@ export class History {
     root: string,
     observed: string,
     removed: Map<string, Removed>,
+    exposure: Policy,
   ): boolean {
     const rel = relative(root, realpathSync(path));
     if (rel.startsWith("..") || isAbsolute(rel))
@@ -438,6 +464,8 @@ export class History {
               .prepare("UPDATE sessions SET revision=? WHERE id=?")
               .run(moved.revision, sessionId);
           if (event.kind === "session") {
+            if (!sessionId && !allows(exposure, event.id, event.cwd))
+              return false;
             if (sessionId) {
               const session = this.db
                 .prepare("SELECT cwd FROM sessions WHERE id=?")
@@ -486,7 +514,7 @@ export class History {
                 sequence,
                 event.timestamp,
                 event.role,
-                event.text,
+                redact(exposure, event.text),
               );
             this.db
               .prepare(
@@ -572,6 +600,11 @@ export class History {
     };
   }
   private observation(expected?: string) {
+    const exposure = this.db
+      .prepare("SELECT path,digest FROM exposure WHERE id=1")
+      .get() as { path: string | null; digest: string } | undefined;
+    if (exposure && policy(exposure.path).digest !== exposure.digest)
+      throw new Error("Exposure policy changed; index again before retrieval");
     const refresh = this.refreshState();
     if (refresh.state === "failed")
       throw new Error(

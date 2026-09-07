@@ -33,7 +33,12 @@ test(
     const run = (...args: string[]) =>
       exec(process.execPath, [cli, ...args, "--db", db], { timeout: 10_000 });
     assert.match((await run("--help")).stdout, /coding-session-history/);
-    const indexed = await run("index", "--source", resolve("test/fixtures"));
+    const indexed = await run(
+      "index",
+      "--all",
+      "--source",
+      resolve("test/fixtures"),
+    );
     assert.equal(indexed.stderr, "");
     assert.equal(
       z.object({ messages: z.number() }).parse(JSON.parse(indexed.stdout))
@@ -45,7 +50,8 @@ test(
         .object({ changed: z.number() })
         .parse(
           JSON.parse(
-            (await run("index", "--source", resolve("test/fixtures"))).stdout,
+            (await run("index", "--all", "--source", resolve("test/fixtures")))
+              .stdout,
           ),
         ).changed,
       0,

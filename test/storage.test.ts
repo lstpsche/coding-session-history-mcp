@@ -315,7 +315,7 @@ test("CLI diagnostics preserve failure category and byte position without record
   appendFileSync(file, '{"secret":"PRIVATE_SENTINEL", invalid}\n');
   const result = spawnSync(
     process.execPath,
-    [resolve("dist/cli.js"), "index", "--source", source, "--db", db],
+    [resolve("dist/cli.js"), "index", "--all", "--source", source, "--db", db],
     { encoding: "utf8" },
   );
   assert.equal(result.status, 1);
