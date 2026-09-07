@@ -20,6 +20,28 @@ const schema = z.discriminatedUnion("mode", [
       mode: z.literal("selected"),
       cwds: z.array(literal).max(1000).default([]),
       sessions: z.array(literal).max(1000).default([]),
+      rollouts: z
+        .array(
+          literal.refine((path) => {
+            const parts = path.split("/");
+            return (
+              /^(sessions|archived_sessions)$/.test(parts[0]!) &&
+              parts.length >= 2 &&
+              parts.every(
+                (part) =>
+                  part !== "" &&
+                  part !== "." &&
+                  part !== ".." &&
+                  !part.includes("\\") &&
+                  !part.includes("\0"),
+              ) &&
+              /^rollout-.+\.jsonl$/.test(parts.at(-1)!)
+            );
+          }),
+        )
+        .max(1000)
+        .refine((paths) => new Set(paths).size === paths.length)
+        .optional(),
       redact: z.array(literal).max(100).default([]),
     })
     .strict(),

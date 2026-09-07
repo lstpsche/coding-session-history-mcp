@@ -92,7 +92,7 @@ function fingerprint(stat: Stats) {
 }
 
 /** Observe namespace and file metadata twice; never publish a detected concurrent change. */
-function observe(root: string) {
+function observe(root: string, rollouts?: string[]) {
   const files = new Map<string, string>();
   const directories = new Map<string, string>();
   const collections: string[] = [];
@@ -129,7 +129,26 @@ function observe(root: string) {
   for (const name of ["sessions", "archived_sessions"]) {
     if (!entries.includes(name)) continue;
     collections.push(name);
-    walk(join(root, name));
+    if (rollouts === undefined) walk(join(root, name));
+  }
+  if (rollouts !== undefined) {
+    for (const rollout of [...rollouts].sort()) {
+      const parts = rollout.split("/");
+      let path = root;
+      for (const [index, part] of parts.entries()) {
+        path = join(path, part);
+        const stat = lstatSync(path);
+        if (index === parts.length - 1) {
+          if (!stat.isFile()) throw new Error(`Not a regular rollout: ${path}`);
+          files.set(path, fingerprint(stat));
+        } else {
+          if (!stat.isDirectory())
+            throw new Error(`Expected real directory: ${path}`);
+          // Unselected siblings may change without invalidating this observation.
+          directories.set(path, `${stat.dev}:${stat.ino}`);
+        }
+      }
+    }
   }
   return {
     files,
@@ -278,7 +297,9 @@ export class History {
     const root = realpathSync(source);
     if (this.db.readonly)
       throw new Error("Cannot index through a read-only database connection");
-    const observation = observe(root);
+    const rollouts =
+      exposure.value.mode === "selected" ? exposure.value.rollouts : undefined;
+    const observation = observe(root, rollouts);
     const paths = [...observation.files.keys()];
     let changed = 0;
     this.db
@@ -351,7 +372,7 @@ export class History {
             changed++;
         if (policy(exposure.path).digest !== exposure.digest)
           throw new Error("Exposure policy changed during indexing; retry");
-        if (observe(root).signature !== observation.signature)
+        if (observe(root, rollouts).signature !== observation.signature)
           throw new Error(
             "History source changed during indexing; retry index",
           );

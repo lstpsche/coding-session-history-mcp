@@ -1,7 +1,14 @@
 import { z } from "zod";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  writeFileSync,
+  rmSync,
+  mkdirSync,
+  readFileSync,
+  symlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { History } from "../src/history.js";
@@ -142,5 +149,63 @@ test("MCP cannot widen local scope and all tools refuse a changed policy", async
     const result = await client.callTool({ name, arguments: args });
     assert.equal(result.isError, true);
     assert.match(JSON.stringify(result), /policy changed/);
+  }
+});
+
+test("explicit rollout ownership excludes duplicates and malformed unselected files", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "history-owner-"));
+  const path = join(root, "policy.json");
+  const history = new History(join(root, "index.sqlite"));
+  t.after(() => {
+    history.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+  const source = join(root, "source");
+  mkdirSync(join(source, "sessions"), { recursive: true });
+  const original = readFileSync(
+    resolve("test/fixtures/sessions/rollout-current.jsonl"),
+  );
+  for (const name of ["chosen", "duplicate"])
+    writeFileSync(join(source, "sessions", `rollout-${name}.jsonl`), original);
+  writeFileSync(join(source, "sessions/rollout-invalid.jsonl"), "invalid\n");
+  const selection = {
+    mode: "selected",
+    sessions: ["fixture-current"],
+    rollouts: ["sessions/rollout-chosen.jsonl"],
+  };
+  writeFileSync(path, JSON.stringify(selection));
+  history.index(source, path);
+  assert.equal(history.list({}).sessions.length, 1);
+  assert.equal(history.index(source, path).changed, 0);
+  writeFileSync(
+    path,
+    JSON.stringify({
+      ...selection,
+      rollouts: [...selection.rollouts, "sessions/rollout-duplicate.jsonl"],
+    }),
+  );
+  assert.throws(
+    () => history.index(source, path),
+    /multiple|duplicate|already/i,
+  );
+  writeFileSync(path, JSON.stringify(selection));
+  history.index(source, path);
+  rmSync(join(source, selection.rollouts[0]!));
+  assert.throws(() => history.index(source, path), /ENOENT/);
+  assert.throws(() => history.list({}), /refresh/i);
+  symlinkSync(
+    join(source, "sessions/rollout-duplicate.jsonl"),
+    join(source, selection.rollouts[0]!),
+  );
+  assert.throws(() => history.index(source, path), /regular rollout/);
+  for (const rollout of [
+    "../rollout-a.jsonl",
+    "/sessions/rollout-a.jsonl",
+    "sessions/../rollout-a.jsonl",
+    "sessions//rollout-a.jsonl",
+    "sessions/rollout-a.jsonl\0",
+  ]) {
+    writeFileSync(path, JSON.stringify({ ...selection, rollouts: [rollout] }));
+    assert.throws(() => policy(path), /Invalid exposure policy/);
   }
 });
