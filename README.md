@@ -47,7 +47,7 @@ For HTTP, provide a private random bearer token of at least 32 characters throug
 node dist/cli.js serve --http --port 7432
 ```
 
-The endpoint is `http://127.0.0.1:7432/mcp`. Every request requires `Authorization: Bearer <token>`. The server binds only to loopback, validates Host, rejects browser Origin headers, and caps request bodies at 64 KiB. Stdio does not use the HTTP token. Tunnel installation, public hosting, OAuth, and ChatGPT connection setup are not included. Do not expose this endpoint publicly as-is.
+The endpoint is `http://127.0.0.1:7432/mcp`. Every request requires `Authorization: Bearer <token>`. The server binds only to loopback, validates Host, rejects browser Origin headers, and caps request bodies at 64 KiB. Stdio does not use the HTTP token. For a private ChatGPT connection, follow [the tunnel setup guide](docs/chatgpt.md). Hosted access requires eligible account permissions. Do not expose this endpoint publicly as-is.
 
 The four tools are:
 
