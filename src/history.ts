@@ -83,7 +83,7 @@ type Message = {
   timestamp: string;
   bytes: number;
 };
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const EMPTY_DIGEST = createHash("sha256").digest("hex");
 
 function fingerprint(stat: Stats) {
@@ -183,6 +183,8 @@ export class History {
       CREATE VIRTUAL TABLE messages_fts USING fts5(text, content='messages', content_rowid='id');
       CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN INSERT INTO messages_fts(rowid,text) VALUES(new.id,new.text); END;
       CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN INSERT INTO messages_fts(messages_fts,rowid,text) VALUES('delete',old.id,old.text); END;
+      CREATE TABLE refresh(id INTEGER PRIMARY KEY CHECK(id=1), state TEXT NOT NULL CHECK(state IN ('never','refreshing','ready','failed')), owner INTEGER, error_id TEXT);
+      INSERT INTO refresh VALUES(1,'never',NULL,NULL);
       CREATE TABLE index_format(parser_version INTEGER NOT NULL);
       INSERT INTO index_format VALUES(${PARSER_VERSION});
       PRAGMA user_version = ${SCHEMA_VERSION};
@@ -209,8 +211,68 @@ export class History {
     this.db.close();
   }
 
-  /** Reconcile the complete configured source set atomically, including moves and deletions. */
+  private refreshState() {
+    return this.db
+      .prepare("SELECT state,owner,error_id FROM refresh WHERE id=1")
+      .get() as {
+      state: "never" | "refreshing" | "ready" | "failed";
+      owner: number | null;
+      error_id: string | null;
+    };
+  }
+
   index(source: string) {
+    if (this.db.readonly)
+      throw new Error("Cannot index through a read-only database connection");
+    this.db
+      .transaction(() => {
+        const refresh = this.refreshState();
+        if (refresh.state === "refreshing" && refresh.owner !== null) {
+          let alive = true;
+          try {
+            process.kill(refresh.owner, 0);
+          } catch (error) {
+            if (
+              !(error instanceof Error) ||
+              !("code" in error) ||
+              error.code !== "ESRCH"
+            )
+              throw error;
+            alive = false;
+          }
+          if (alive) throw new Error("Another index writer is active");
+        }
+        this.db
+          .prepare(
+            "UPDATE refresh SET state='refreshing',owner=?,error_id=NULL WHERE id=1",
+          )
+          .run(process.pid);
+      })
+      .immediate();
+    try {
+      const result = this.reconcile(source);
+      this.db
+        .prepare(
+          "UPDATE refresh SET state='ready',owner=NULL,error_id=NULL WHERE id=1",
+        )
+        .run();
+      return { ...result, refresh: this.refreshState() };
+    } catch (cause) {
+      const id = randomUUID();
+      this.db
+        .prepare(
+          "UPDATE refresh SET state='failed',owner=NULL,error_id=? WHERE id=1",
+        )
+        .run(id);
+      throw new Error(
+        `Index refresh failed [${id}]: ${cause instanceof Error ? cause.message : "non-Error failure"}`,
+        { cause },
+      );
+    }
+  }
+
+  /** Reconcile the complete configured source set atomically, including moves and deletions. */
+  private reconcile(source: string) {
     const root = realpathSync(source);
     if (this.db.readonly)
       throw new Error("Cannot index through a read-only database connection");
@@ -464,6 +526,7 @@ export class History {
 
   status() {
     return {
+      refresh: this.refreshState(),
       indexed_at:
         (
           this.db.prepare("SELECT indexed_at FROM source").get() as
@@ -509,6 +572,15 @@ export class History {
     };
   }
   private observation(expected?: string) {
+    const refresh = this.refreshState();
+    if (refresh.state === "failed")
+      throw new Error(
+        `Index refresh failed [${refresh.error_id}]; repair the source and run index again`,
+      );
+    if (refresh.state === "refreshing")
+      throw new Error(
+        "Index is refreshing or was interrupted; retry after a successful index",
+      );
     const row = this.db
       .prepare("SELECT indexed_at,revision FROM source")
       .get() as { indexed_at: string | null; revision: string } | undefined;

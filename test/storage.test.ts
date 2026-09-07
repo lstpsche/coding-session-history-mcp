@@ -51,10 +51,14 @@ function fixture(t: TestContext) {
 }
 function snapshot(history: History) {
   return [
-    history.status(),
+    history.db.prepare("SELECT * FROM source").all(),
     history.db.prepare("SELECT * FROM messages").all(),
     history.db.prepare("SELECT * FROM files").all(),
-    history.search({ query: "original" }),
+    history.db
+      .prepare(
+        "SELECT rowid FROM messages_fts WHERE messages_fts MATCH 'original'",
+      )
+      .all(),
   ];
 }
 
@@ -199,7 +203,10 @@ for (const failure of ["before offset", "commit"] as const) {
       /injected offset failure|FOREIGN KEY/,
     );
     assert.deepEqual(snapshot(history), before);
-    assert.equal(history.search({ query: "unpublished" }).results.length, 0);
+    assert.throws(
+      () => history.search({ query: "unpublished" }),
+      /refresh failed/,
+    );
     history.close();
     const resumed = new History(db);
     try {
@@ -237,7 +244,10 @@ test("SIGKILL inside a write transaction recovers the prior committed index", (t
   const recovered = new History(db);
   try {
     assert.equal(recovered.status().messages, 1);
-    assert.equal(recovered.search({ query: "aftercrash" }).results.length, 0);
+    assert.throws(
+      () => recovered.search({ query: "aftercrash" }),
+      /refreshing|interrupted/,
+    );
     assert.equal(recovered.index(source).messages, 2);
     assert.equal(recovered.index(source).changed, 0);
     assert.equal(
@@ -290,7 +300,10 @@ for (const race of [
     try {
       assert.throws(() => history.index(source), /changed|real directory/);
       assert.deepEqual(snapshot(history), before);
-      assert.equal(history.search({ query: "racing" }).results.length, 0);
+      assert.throws(
+        () => history.search({ query: "racing" }),
+        /refresh failed/,
+      );
     } finally {
       history.close();
     }

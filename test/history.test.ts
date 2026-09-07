@@ -99,7 +99,7 @@ test("malformed complete record rolls back entire reconciliation", (t) => {
   appendFileSync(file, msg("after") + "{invalid}\n");
   assert.throws(() => history.index(root), /Invalid rollout record/);
   assert.equal(history.status().messages, 1);
-  assert.equal(history.search({ query: "after" }).results.length, 0);
+  assert.throws(() => history.search({ query: "after" }), /refresh failed/);
 });
 
 test("rewrite, archive and removal reconcile FTS and stable IDs", (t) => {

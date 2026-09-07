@@ -3,6 +3,7 @@ import { z } from "zod";
 import { parseArgs } from "node:util";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { watch } from "./watch.js";
 import { History } from "./history.js";
 import { makeServer, serveHttp } from "./server.js";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
@@ -12,6 +13,7 @@ async function main() {
     allowPositionals: true,
     options: {
       source: { type: "string" },
+      "interval-ms": { type: "string" },
       db: { type: "string" },
       repo: { type: "string" },
       since: { type: "string" },
@@ -33,13 +35,14 @@ async function main() {
   const [command, argument] = positionals;
   if (values.help || !command) {
     console.log(
-      "coding-session-history index|status|search <query>|sessions|show <id>|messages <id>|serve [--http]\nOptions: --source <Codex home> --db <path> --repo <exact cwd> --since <ISO timestamp> --until <ISO timestamp> --limit <n> --after <message id> --revision <id> --message-id <n> --before <n> --through <n> --byte-offset <n> --offset <n> --corpus-revision <id> --port <n>\nHTTP requires CSH_TOKEN (at least 32 characters) and binds to 127.0.0.1. Run index explicitly to refresh.",
+      "coding-session-history index|watch|status|search <query>|sessions|show <id>|messages <id>|serve [--http]\nOptions: --source <Codex home> --db <path> --repo <exact cwd> --since <ISO timestamp> --until <ISO timestamp> --limit <n> --after <message id> --revision <id> --message-id <n> --before <n> --through <n> --byte-offset <n> --offset <n> --corpus-revision <id> --port <n>\nHTTP requires CSH_TOKEN (at least 32 characters) and binds to 127.0.0.1. Run index explicitly to refresh.",
     );
     return;
   }
   if (
     ![
       "index",
+      "watch",
       "status",
       "search",
       "sessions",
@@ -49,6 +52,28 @@ async function main() {
     ].includes(command)
   )
     throw new Error(`Unknown command: ${command}`);
+  if (command === "watch") {
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+    try {
+      await watch(
+        values.source ?? process.env.CODEX_HOME ?? join(homedir(), ".codex"),
+        values.db ??
+          join(
+            homedir(),
+            ".local/share/coding-session-history-mcp/index.sqlite",
+          ),
+        Number(values["interval-ms"] ?? 15000),
+        controller.signal,
+      );
+    } finally {
+      process.removeListener("SIGINT", stop);
+      process.removeListener("SIGTERM", stop);
+    }
+    return;
+  }
   const history = new History(
     values.db ??
       join(homedir(), ".local/share/coding-session-history-mcp/index.sqlite"),
