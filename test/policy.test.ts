@@ -128,15 +128,12 @@ test("MCP cannot widen local scope and all tools refuse a changed policy", async
     name: "codex_search",
     arguments: { query: "lexical", policy: { mode: "all" } },
   });
-  const text = z
-    .object({
-      content: z
-        .array(z.object({ type: z.literal("text"), text: z.string() }))
-        .nonempty(),
-    })
-    .parse(widen).content[0]!.text;
   assert.deepEqual(
-    z.object({ results: z.array(z.unknown()) }).parse(JSON.parse(text)).results,
+    z
+      .object({
+        structuredContent: z.object({ results: z.array(z.unknown()) }),
+      })
+      .parse(widen).structuredContent.results,
     [],
   );
   writeFileSync(path, JSON.stringify({ mode: "selected" }));

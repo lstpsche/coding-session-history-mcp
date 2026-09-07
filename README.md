@@ -98,6 +98,8 @@ For a private benchmark, provide a fixed source snapshot and a JSON array of cas
 
 Use `tmp/` for private snapshots, benchmark cases and reports; it is excluded from Git. Never put actual conversations in test fixtures. `npm test` builds the CLI before exercising child-process transport tests.
 
-Session titles/model metadata, opt-in tool output and remote-client setup remain future work. Embeddings and generated summaries are intentionally absent until retrieval evidence justifies them.
+Session titles/model metadata and opt-in tool output remain future work. Embeddings and generated summaries are intentionally absent until retrieval evidence justifies them.
+
+MCP tools advertise output schemas and return their complete result in `structuredContent`; the text block only points to that data. Clients must consume structured results (MCP 2025-06-18 or newer). Both the wrapper and data count toward the 64 KiB limit. CLI commands still print the complete JSON directly. Search uses lexical AND semantics: start with one to three distinctive terms, search separate topics separately, and remove terms or try synonyms when empty. Empty results alone do not establish absence.
 
 This project is independent and is not affiliated with or endorsed by OpenAI.

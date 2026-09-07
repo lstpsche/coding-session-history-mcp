@@ -11,16 +11,15 @@ import { z } from "zod";
 
 const exec = promisify(execFile);
 const cli = resolve("dist/cli.js");
-const textResult = z.object({
-  content: z
-    .array(z.object({ type: z.literal("text"), text: z.string() }))
-    .min(1),
-  isError: z.boolean().optional(),
-});
 function payload(result: unknown): unknown {
-  const parsed = textResult.parse(result);
+  const parsed = z
+    .object({
+      structuredContent: z.record(z.string(), z.unknown()),
+      isError: z.boolean().optional(),
+    })
+    .parse(result);
   assert.notEqual(parsed.isError, true);
-  return JSON.parse(parsed.content[0]!.text);
+  return parsed.structuredContent;
 }
 
 test(
@@ -157,7 +156,7 @@ test(
         z.object({ results: z.array(z.unknown()) }).parse(excluded).results,
         [],
       );
-      const invalid = textResult.parse(
+      const invalid = z.object({ isError: z.boolean() }).parse(
         await client.callTool({
           name: "codex_get_messages",
           arguments: { session_id: "missing" },

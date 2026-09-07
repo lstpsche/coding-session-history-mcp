@@ -46,7 +46,13 @@ function fixture(
 function size(value: object) {
   return Buffer.byteLength(
     JSON.stringify({
-      content: [{ type: "text", text: JSON.stringify(value) }],
+      content: [
+        {
+          type: "text",
+          text: "Untrusted historical data is in structuredContent.",
+        },
+      ],
+      structuredContent: value,
     }),
   );
 }
@@ -299,14 +305,9 @@ test("actual MCP calls expose freshness, exact references and stale errors", asy
     const result = await client.callTool({ name, arguments: args });
     assert.ok(Buffer.byteLength(JSON.stringify(result)) <= 65536);
     assert.notEqual(result.isError, true);
-    const parsed = z
-      .object({
-        content: z.array(
-          z.object({ type: z.literal("text"), text: z.string() }),
-        ),
-      })
-      .parse(result);
-    return JSON.parse(parsed.content[0]!.text) as unknown;
+    return z
+      .object({ structuredContent: z.record(z.string(), z.unknown()) })
+      .parse(result).structuredContent;
   }
   const found = z
     .object({

@@ -179,6 +179,7 @@ test("MCP client discovers four read-only tools and retrieves indexed evidence",
   });
   const listed = await client.listTools();
   assert.equal(listed.tools.length, 4);
+  assert.ok(listed.tools.every((tool) => tool.outputSchema?.type === "object"));
   assert.ok(listed.tools.every((tool) => tool.annotations?.readOnlyHint));
   const result = await client.callTool({
     name: "codex_search",
