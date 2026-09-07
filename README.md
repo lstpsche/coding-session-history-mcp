@@ -18,78 +18,59 @@ The server indexes selected user and assistant messages into a local SQLite data
 
 ## Install
 
+Install with Homebrew on macOS:
+
+```sh
+brew install lstpsche/tap/coding-session-history-mcp
+coding-session-history --help
+```
+
+The [tap](https://github.com/lstpsche/homebrew-tap) manages Node and the native SQLite dependency. Run `coding-session-history setup --repo /absolute/path/to/your/project` after installation. Installation does not index history or start a service.
+
+For a manual tarball installation:
+
 Requires **Node.js 24 or later** and **npm**. Check with `node --version` and `npm --version`. macOS is tested, including automatic startup through launchd. Linux and Windows have not been qualified for this release; the commands below use a POSIX shell.
 
-Download `coding-session-history-mcp-1.0.0.tgz` from [GitHub Releases](https://github.com/lstpsche/coding-session-history-mcp/releases/latest), then run these commands from the folder containing the download. No repository checkout or global npm permissions are needed:
+Download `coding-session-history-mcp-1.1.0.tgz` from [GitHub Releases](https://github.com/lstpsche/coding-session-history-mcp/releases/latest), then run these commands from the folder containing the download. No repository checkout or global npm permissions are needed:
 
 ```sh
 csh_install="$HOME/.local/share/coding-session-history-runtime"
 npm install --prefix "$csh_install" \
-  ./coding-session-history-mcp-1.0.0.tgz
+  ./coding-session-history-mcp-1.1.0.tgz
 
 csh_cli="$csh_install/node_modules/coding-session-history-mcp/dist/cli.js"
 node "$csh_cli" --help
 ```
 
-For command-line downloads, use `gh release download v1.0.0 --repo lstpsche/coding-session-history-mcp --pattern coding-session-history-mcp-1.0.0.tgz` with the GitHub CLI. Private repositories require an authorized GitHub login; npm does not inherit that login for direct HTTPS release URLs.
+For command-line downloads, use `gh release download v1.1.0 --repo lstpsche/coding-session-history-mcp --pattern coding-session-history-mcp-1.1.0.tgz` with the GitHub CLI.
 
 The package includes compiled JavaScript; npm installs its dependencies. It is distributed through GitHub, **not the npm registry**. If the native `better-sqlite3` dependency cannot install, use a supported Node LTS release and check npm's build diagnostic. A native build may require a C/C++ compiler and Python; macOS users can install Apple's Command Line Tools with `xcode-select --install`.
 
 ## First run
 
-Keep these commands in the same terminal as the installation commands. Replace `/absolute/path/to/your/project` with the exact working directory recorded by Codex for the project you want to expose.
+The `setup` command creates a project policy, builds the initial index and prints ready-to-paste MCP configuration. With Homebrew, run:
 
 ```sh
-csh_project="/absolute/path/to/your/project"
-csh_data="$HOME/.local/share/coding-session-history-mcp"
-csh_source="${CODEX_HOME:-$HOME/.codex}"
-mkdir -p "$csh_data"
-chmod 700 "$csh_data"
-
-node --input-type=module - "$csh_data/policy.json" "$csh_project" <<'JS'
-import { writeFileSync } from 'node:fs';
-writeFileSync(process.argv[2], JSON.stringify({
-  mode: 'selected', cwds: [process.argv[3]], redact: []
-}, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
-JS
-
-node "$csh_cli" index --source "$csh_source" \
-  --policy "$csh_data/policy.json" --db "$csh_data/index.sqlite"
-node "$csh_cli" status --db "$csh_data/index.sqlite"
-node "$csh_cli" sessions --db "$csh_data/index.sqlite"
-node "$csh_cli" search "bootstrap" --db "$csh_data/index.sqlite"
+coding-session-history setup --repo /absolute/path/to/your/project
 ```
 
-The policy command creates a new file and refuses to overwrite an existing one. If it already exists, inspect and edit it deliberately, then run `index` again. A successful index reports `refresh.state: "ready"`, its timestamp, and session/message counts. Zero sessions usually means the recorded working directory differs from your selection. Search for a term you know appears in your own history; `bootstrap` is only an example.
+For a tarball installation, use `node "$csh_cli" setup --repo /absolute/path/to/your/project`. From a source checkout, use `node dist/cli.js setup --repo /absolute/path/to/your/project`.
 
-Scope is explicit: `cwds` matches recorded working directories exactly, rather than inferring Git roots. Session IDs may also be selected. If unrelated legacy rollouts or duplicate IDs prevent indexing, restrict discovery to exact `rollouts` paths in the policy. See [scope and format details](docs/reference.md). No history is exposed by an empty selection.
+Use the exact project working directory recorded by Codex. Setup reads `CODEX_HOME` or `~/.codex`, creates an owner-readable policy beside the default index, and reports the session/message counts. It prints the MCP configuration to stdout and a ready-to-run background refresh command to stderr. Copy the configuration into your MCP client, then run the refresh command in another terminal.
 
-Review the indexed sessions before connecting a client. `show SESSION_ID` returns an overview; `messages SESSION_ID` begins reading that session. Both commands accept the same `--db` flag. History may contain private information in ordinary messages; literal redaction is not automatic secret detection.
+Setup can be rerun for the same project and preserves existing literal redaction settings. It refuses to replace a policy selecting another scope. Use a separate `--db /absolute/private/directory/index.sqlite` for a separate project, or manage a custom policy with `index`. Failed indexing produces an error without printing successful client configuration. Zero matching sessions are reported explicitly; check the recorded working directory.
 
 ## Connect an MCP client
 
-Index once before starting the server. To generate a configuration containing the actual Node, installed CLI and database paths:
+Merge the JSON printed by setup with your client's existing MCP configuration, then restart or reconnect that client. The configuration includes absolute Node, CLI and database paths. `serve` waits for MCP requests over stdio; it is not an interactive terminal application.
 
-```sh
-node --input-type=module - "$csh_cli" "$csh_data/index.sqlite" <<'JS'
-console.log(JSON.stringify({ mcpServers: {
-  'coding-session-history': {
-    command: process.execPath,
-    args: [process.argv[2], 'serve', '--db', process.argv[3]]
-  }
-}}, null, 2));
-JS
-```
+Clients must support structured results in `structuredContent`. Confirm all four tools below are available, then try: **“Search my coding history for the SQLite decision, then expand the exact message that supports it.”**
 
-Add the printed entry to your client's MCP configuration and restart or reconnect the client. Clients use different configuration locations; merge it with existing entries. The server communicates over stdio and waits for MCP requests, so launching `serve` in a terminal does not display an interactive interface.
-
-Clients must support MCP structured results: the complete response is in `structuredContent`, and the text block is only a pointer. After connecting, confirm that all four tools below are available. Try: **“Search my coding history for the SQLite decision, then expand the exact message that supports it.”**
-
-For **ChatGPT**, follow the [tunnel setup guide](docs/chatgpt.md). It explains the separate account, workspace and tunnel authorization steps. The optional HTTP transport is restricted to authenticated loopback access; see the [reference](docs/reference.md).
+For **ChatGPT**, follow the [tunnel setup guide](docs/chatgpt.md). Account and tunnel authorization remain separate from local setup. For custom policy files, redaction and physical rollout selection, see the [reference](docs/reference.md).
 
 ## Keep history up to date
 
-`serve` reads the index; it does not refresh it. Run `index` again when needed, or run this separate process:
+`serve` reads the index; it does not refresh it. Use the exact refresh command printed by setup. For a [manual packaged installation](docs/manual-setup.md) with the variables from that guide, run:
 
 ```sh
 node "$csh_cli" watch --source "$csh_source" \

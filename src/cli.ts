@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { setup } from "./setup.js";
 import { z } from "zod";
 import { parseArgs } from "node:util";
 import { homedir } from "node:os";
@@ -39,12 +40,13 @@ async function main() {
   const [command, argument] = positionals;
   if (values.help || !command) {
     console.log(
-      "coding-session-history index|watch|launchd|status|search <query>|sessions|show <id>|messages <id>|serve [--http]\nOptions: --policy <JSON path> | --all (required for writers) --interval-ms <100..300000> --source <Codex home> --db <path> --repo <exact cwd> --since <ISO timestamp> --until <ISO timestamp> --limit <n> --after <message id> --revision <id> --message-id <n> --before <n> --through <n> --byte-offset <n> --offset <n> --corpus-revision <id> --port <n>\nHTTP requires CSH_TOKEN (at least 32 characters) and binds to 127.0.0.1. Run index explicitly to refresh.",
+      "coding-session-history setup --repo <project path>|index|watch|launchd|status|search <query>|sessions|show <id>|messages <id>|serve [--http]\nOptions: --policy <JSON path> | --all (required for writers) --interval-ms <100..300000> --source <Codex home> --db <path> --repo <exact cwd> --since <ISO timestamp> --until <ISO timestamp> --limit <n> --after <message id> --revision <id> --message-id <n> --before <n> --through <n> --byte-offset <n> --offset <n> --corpus-revision <id> --port <n>\nHTTP requires CSH_TOKEN (at least 32 characters) and binds to 127.0.0.1. Run index explicitly to refresh.",
     );
     return;
   }
   if (
     ![
+      "setup",
       "index",
       "watch",
       "launchd",
@@ -57,6 +59,32 @@ async function main() {
     ].includes(command)
   )
     throw new Error(`Unknown command: ${command}`);
+  if (command === "setup") {
+    if (!values.repo || values.policy || values.all || argument)
+      throw new Error(
+        "setup requires --repo <project path>; use index for a custom --policy or --all",
+      );
+    const result = setup(
+      values.repo,
+      values.source ?? process.env.CODEX_HOME ?? join(homedir(), ".codex"),
+      values.db ??
+        join(homedir(), ".local/share/coding-session-history-mcp/index.sqlite"),
+    );
+    console.error(
+      `Indexed ${result.status.sessions} sessions and ${result.status.messages} messages. Paste the following JSON into your MCP client configuration.`,
+    );
+    if (result.status.sessions === 0)
+      console.error(
+        "No matching sessions: check the exact working directory recorded by Codex.",
+      );
+    console.log(JSON.stringify(result.config, null, 2));
+    const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+    console.error(
+      "Keep history refreshed in a separate terminal:\n" +
+        result.refresh.map(quote).join(" "),
+    );
+    return;
+  }
   if (command === "launchd") {
     if (!values.policy || !values.source || !values.db || values.all)
       throw new Error("launchd requires --source, --db and --policy");
