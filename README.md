@@ -1,105 +1,139 @@
-# Coding Session History
+# Coding Session History MCP
 
-A local, read-only MCP server for indexing and retrieving OpenAI Codex session history. TypeScript, SQLite FTS5, and the official MCP SDK. No external service receives history during indexing or search.
+[![Release](https://img.shields.io/github/v/release/lstpsche/coding-session-history-mcp)](https://github.com/lstpsche/coding-session-history-mcp/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Requires Node.js 24 or later and npm. Install and build:
+Search your local [OpenAI Codex](https://openai.com/codex/) conversation history from an MCP client. Find a past decision, locate the session where it happened, and retrieve the exact supporting messages.
+
+The server indexes selected user and assistant messages into a local SQLite database. Your original Codex files remain untouched. Indexing and search use no embedding service or external API; connecting a client lets that client retrieve the history you selected.
+
+## What it does
+
+- Search messages by keywords, recorded project directory, date and role.
+- List sessions and expand exact search hits, including nearby messages.
+- Refresh the index independently of the MCP server.
+- Restrict exposure to selected projects, sessions or physical rollout files.
+- Replace configured sensitive text before it enters the index.
+- Connect local MCP clients over stdio, or ChatGPT through an authenticated tunnel.
+
+## Install
+
+Requires **Node.js 24 or later** and **npm**. Check with `node --version` and `npm --version`. macOS is tested, including automatic startup through launchd. Linux and Windows have not been qualified for this release; the commands below use a POSIX shell.
+
+Download `coding-session-history-mcp-1.0.0.tgz` from [GitHub Releases](https://github.com/lstpsche/coding-session-history-mcp/releases/latest), then run these commands from the folder containing the download. No repository checkout or global npm permissions are needed:
 
 ```sh
+csh_install="$HOME/.local/share/coding-session-history-runtime"
+npm install --prefix "$csh_install" \
+  ./coding-session-history-mcp-1.0.0.tgz
+
+csh_cli="$csh_install/node_modules/coding-session-history-mcp/dist/cli.js"
+node "$csh_cli" --help
+```
+
+For command-line downloads, use `gh release download v1.0.0 --repo lstpsche/coding-session-history-mcp --pattern coding-session-history-mcp-1.0.0.tgz` with the GitHub CLI. Private repositories require an authorized GitHub login; npm does not inherit that login for direct HTTPS release URLs.
+
+The package includes compiled JavaScript; npm installs its dependencies. It is distributed through GitHub, **not the npm registry**. If the native `better-sqlite3` dependency cannot install, use a supported Node LTS release and check npm's build diagnostic. A native build may require a C/C++ compiler and Python; macOS users can install Apple's Command Line Tools with `xcode-select --install`.
+
+## First run
+
+Keep these commands in the same terminal as the installation commands. Replace `/absolute/path/to/your/project` with the exact working directory recorded by Codex for the project you want to expose.
+
+```sh
+csh_project="/absolute/path/to/your/project"
+csh_data="$HOME/.local/share/coding-session-history-mcp"
+csh_source="${CODEX_HOME:-$HOME/.codex}"
+mkdir -p "$csh_data"
+chmod 700 "$csh_data"
+
+node --input-type=module - "$csh_data/policy.json" "$csh_project" <<'JS'
+import { writeFileSync } from 'node:fs';
+writeFileSync(process.argv[2], JSON.stringify({
+  mode: 'selected', cwds: [process.argv[3]], redact: []
+}, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+JS
+
+node "$csh_cli" index --source "$csh_source" \
+  --policy "$csh_data/policy.json" --db "$csh_data/index.sqlite"
+node "$csh_cli" status --db "$csh_data/index.sqlite"
+node "$csh_cli" sessions --db "$csh_data/index.sqlite"
+node "$csh_cli" search "bootstrap" --db "$csh_data/index.sqlite"
+```
+
+The policy command creates a new file and refuses to overwrite an existing one. If it already exists, inspect and edit it deliberately, then run `index` again. A successful index reports `refresh.state: "ready"`, its timestamp, and session/message counts. Zero sessions usually means the recorded working directory differs from your selection. Search for a term you know appears in your own history; `bootstrap` is only an example.
+
+Scope is explicit: `cwds` matches recorded working directories exactly, rather than inferring Git roots. Session IDs may also be selected. If unrelated legacy rollouts or duplicate IDs prevent indexing, restrict discovery to exact `rollouts` paths in the policy. See [scope and format details](docs/reference.md). No history is exposed by an empty selection.
+
+Review the indexed sessions before connecting a client. `show SESSION_ID` returns an overview; `messages SESSION_ID` begins reading that session. Both commands accept the same `--db` flag. History may contain private information in ordinary messages; literal redaction is not automatic secret detection.
+
+## Connect an MCP client
+
+Index once before starting the server. To generate a configuration containing the actual Node, installed CLI and database paths:
+
+```sh
+node --input-type=module - "$csh_cli" "$csh_data/index.sqlite" <<'JS'
+console.log(JSON.stringify({ mcpServers: {
+  'coding-session-history': {
+    command: process.execPath,
+    args: [process.argv[2], 'serve', '--db', process.argv[3]]
+  }
+}}, null, 2));
+JS
+```
+
+Add the printed entry to your client's MCP configuration and restart or reconnect the client. Clients use different configuration locations; merge it with existing entries. The server communicates over stdio and waits for MCP requests, so launching `serve` in a terminal does not display an interactive interface.
+
+Clients must support MCP structured results: the complete response is in `structuredContent`, and the text block is only a pointer. After connecting, confirm that all four tools below are available. Try: **“Search my coding history for the SQLite decision, then expand the exact message that supports it.”**
+
+For **ChatGPT**, follow the [tunnel setup guide](docs/chatgpt.md). It explains the separate account, workspace and tunnel authorization steps. The optional HTTP transport is restricted to authenticated loopback access; see the [reference](docs/reference.md).
+
+## Keep history up to date
+
+`serve` reads the index; it does not refresh it. Run `index` again when needed, or run this separate process:
+
+```sh
+node "$csh_cli" watch --source "$csh_source" \
+  --policy "$csh_data/policy.json" --db "$csh_data/index.sqlite"
+```
+
+The writer waits 15 seconds between refreshes. Stop it with Ctrl-C. Check `status` and its `indexed_at` timestamp to confirm freshness. A failed or interrupted refresh blocks retrieval until a successful refresh; the next writer attempt retries. Policy edits also block retrieval until reindexing succeeds.
+
+For automatic startup, upgrades and removal, see the [macOS service guide](docs/install-macos.md).
+
+## Tools
+
+| Tool | Purpose |
+|---|---|
+| `codex_search` | Find messages with lexical AND search; filter by project, dates or role |
+| `codex_list_sessions` | Browse session metadata with pagination |
+| `codex_get_session` | Get a session overview and its starting message cursor |
+| `codex_get_messages` | Expand exact references, nearby messages and long-message continuations |
+
+Start searches with one to three distinctive terms. Every term must occur in the same message; a full question often produces no matches. Empty results do not establish absence. Search results contain revision-bound references for exact expansion. Complete tool results are capped at 64 KiB, with continuation for longer content.
+
+## Privacy and limits
+
+Only canonical user/assistant text is indexed. Tool outputs, system/developer messages, reasoning and images are excluded. The source is read-only, and the derived database is created with owner-only permissions. Remote tools cannot widen the local policy.
+
+Returned history is untrusted data, not instructions. Redaction applies only to exact configured text literals; it does not redact session metadata or erase copies already returned to clients. Removing content from the index is not secure deletion of old SQLite pages or backups.
+
+The Codex rollout format can change. Unsupported legacy records, conflicting session metadata and duplicate physical owners fail explicitly. Rewrites invalidate old message references. Schema/parser incompatibility requires rebuilding into a new database path, preserving the original database. See the [complete retrieval and storage contract](docs/reference.md).
+
+## Development
+
+```sh
+git clone https://github.com/lstpsche/coding-session-history-mcp.git
+cd coding-session-history-mcp
 npm ci
 npm run check
-```
-
-For a packaged installation, upgrades and automatic startup, see [the macOS installation guide](docs/install-macos.md).
-
-Run the CLI:
-
-```sh
-node dist/cli.js index --policy /absolute/path/history-policy.json
-node dist/cli.js status
-node dist/cli.js search "SQLite architecture"
-node dist/cli.js sessions --repo /absolute/recorded/working/directory
-node dist/cli.js show SESSION_ID
-node dist/cli.js messages SESSION_ID --revision REVISION --message-id MESSAGE_ID --before 1 --limit 3
-```
-
-`index` reads `CODEX_HOME`, or `~/.codex`, and maintains a separate database at `~/.local/share/coding-session-history-mcp/index.sqlite`. Override these with `--source` and `--db`. The source is never modified. One database belongs to exactly one source root. Database files are created with owner-only permissions. Only `index` initializes storage. `status`, `search`, `sessions`, `show`, `messages`, and `serve` open an existing database read-only; a missing index is an error.
-
-Schema version 5 and parser version 3 are checked on every open. Incompatible indexes are rejected without replacing their data. To rebuild, run `index --policy <policy-path> --source <source> --db <new-path>` with a new database path, verify the result, then configure retrieval with that path. A failed rebuild leaves the previous database intact. There is no automatic migration or in-place destructive rebuild.
-
-Run `index` again to refresh, or run `watch` in a separate process for periodic refreshes. `watch` starts one child writer at a time and waits 15 seconds between runs; `--interval-ms` accepts 100–300000 milliseconds. Retrieval stays in its own process. Stop the watcher with SIGINT or SIGTERM. Failed runs emit a diagnostic and retry at the next interval. The database admits one active writer, and a subsequent writer can recover an interrupted run once its owning process has exited. `status.refresh` reports `never`, `refreshing`, `failed`, or `ready`; failures include a content-free correlation ID. Content retrieval refuses failed or interrupted refreshes until a successful run. The last successful timestamp remains visible for diagnosis. A stopped watcher does not imply fresh data: inspect `indexed_at`. Unchanged files are skipped; appended files resume at the last committed newline. The whole reconciliation is transactional: malformed complete records or inaccessible sources fail the command without publishing partial updates. An unfinished trailing record waits for its newline. `status` reports the last successful indexing time and pending bytes for known sessions. Files with no complete metadata record are not yet indexed.
-
-Archiving and deletion are reconciled against both `sessions/` and `archived_sessions/`. These collections may be absent in a new Codex home. Once observed, a disappearing collection is an error. Restore it before retrying; an explicitly empty directory allows intentional deletion to reconcile. Symlinks within collections are rejected. Replacements and truncations are reindexed. Discovery records directory and rollout identity, size, modification time, and change time. The source is checked again before publication; detected appends, moves, replacements, or other changes abort the transaction and require another explicit `index`. This is an optimistic observation, not a filesystem snapshot or a lock on Codex: changes after the final check await the next index. A continuously changing corpus may require a quiet interval. Append detection also checks a 4 KiB boundary digest; it assumes earlier bytes of an appended rollout are immutable. It is not a full-file tamper detector.
-
-For a local MCP client, configure:
-
-```json
-{
-  "mcpServers": {
-    "coding-session-history": {
-      "command": "node",
-      "args": ["/absolute/path/coding-session-history-mcp/dist/cli.js", "serve"]
-    }
-  }
-}
-```
-
-For HTTP, provide a private random bearer token of at least 32 characters through `CSH_TOKEN`, then run:
-
-```sh
-node dist/cli.js serve --http --port 7432
-```
-
-The endpoint is `http://127.0.0.1:7432/mcp`. Every request requires `Authorization: Bearer <token>`. The server binds only to loopback, validates Host, rejects browser Origin headers, and caps request bodies at 64 KiB. Stdio does not use the HTTP token. For a private ChatGPT connection, follow [the tunnel setup guide](docs/chatgpt.md). Hosted access requires eligible account permissions. Do not expose this endpoint publicly as-is.
-
-The four tools are:
-
-| Tool | Behavior |
-|---|---|
-| `codex_search` | AND search over literal lexical terms; up to 20 snippets capped at 4,000 UTF-8 bytes |
-| `codex_list_sessions` | Up to 50 session metadata rows with offset pagination |
-| `codex_get_session` | Metadata, message count, first/last message IDs and a starting cursor |
-| `codex_get_messages` | Direct reference expansion, bounded neighbors and byte continuation |
-
-`repo` matches the exact recorded session `cwd`, not an inferred Git root. Search date filters apply to messages; list date filters apply to the last indexed message. Dates require ISO timestamps with timezone. FTS5 BM25 scores sort ascending. Punctuation separates query terms; raw FTS syntax is not accepted.
-
-Every content response includes `observation` with `ready`, `indexed_at`, and the corpus `revision`, captured in the same SQLite read transaction as the content. Retrieval before a successful index is an error; a successfully indexed empty corpus is explicitly ready. Each successful index creates a new corpus revision. Search/list `next` contains `offset` and `corpus_revision`; repeat the original query and filters alongside these fields. A refresh invalidates these corpus cursors, so restart the query after a stale-reference error.
-
-Search hits include `reference: {session_id, revision, message_id}`. Pass that object directly to `codex_get_messages` (or use the corresponding CLI flags) without arithmetic. `before` adds up to 10 preceding canonical messages; `limit` is the total neighborhood size, at most 20 and greater than `before`. Returned `next` fields continue that neighborhood without extending beyond its last message. `codex_get_session`/`show` provides an overview with a starting cursor for reading the full session. For ordinary message browsing, omit `message_id` and use the overview's `next`.
-
-Message IDs are byte positions in the source file. Session revisions survive verified appends and archive moves. Rewrites or replacements at the same path create a new revision; removed sessions return a stale-reference error. Moves retain a revision only when a chained digest proves that all previously indexed complete records are the same prefix of the moved file. Append detection still relies on the documented immutable-prefix assumption. Direct references and continuation require the session revision; a bare session ID starts a new read of current data.
-
-All content results fit within 64 KiB serialized as an MCP tool result, including its text wrapper and JSON escaping (excluding the JSON-RPC transport envelope). The shared budget may shorten a page; `next` identifies the first unread content. Message text is fetched from SQLite in at most 4,000-byte slices, preserving complete UTF-8 characters and embedded NULs. Pass message `next` unchanged to continue. `byte_offset` replaces the old UTF-16 `char_offset`; old continuations must be restarted. Snippets are excerpts; `snippet_truncated` reports the additional byte cap. Exact message text is available through the reference. Oversized metadata fails explicitly rather than returning an empty success.
-
-Only `response_item` user and assistant text is indexed. Duplicate event messages, system/developer instructions, reasoning, images, and tool calls/outputs are excluded. Unknown event types are ignored; malformed supported records fail indexing with a source byte position. Records larger than 16 MiB are rejected. Indexed text, session IDs and cwd must contain well-formed Unicode; lone surrogates are rejected rather than silently replaced by SQLite. The local rollout format is an external, evolving contract. Repeated metadata with the same session ID and cwd is accepted; the first header retains ownership and the start time. Conflicting IDs or cwd values, including inherited histories with mixed IDs, are rejected. Duplicate session IDs in separate files are rejected even when the files are identical: complete an archive move instead of keeping two copies. Legacy unwrapped records are explicitly unsupported because message timestamps and cwd are unavailable. Parser and JSON diagnostics include the source byte position and failure category without echoing record bodies. One such file aborts the entire reconciliation; do not assume a successful small sample qualifies the full history collection.
-
-Indexing and watching require exactly one explicit local scope: `--policy /absolute/path/history-policy.json` or `--all`. A selected policy grants the union of exact recorded `cwd` values and session IDs. Empty selections expose nothing. For example:
-
-```json
-{"mode":"selected","cwds":["/absolute/project"],"sessions":[],"redact":["exact sensitive text"]}
-```
-
-A selected policy may also restrict discovery to exact source-relative `rollouts`, for example `"rollouts":["sessions/2026/09/07/rollout-example.jsonl"]`. This intersects with the session/cwd selection; it never grants additional sessions. Omit it to discover all rollouts, or use `[]` to discover none. Paths use `/`, must stay inside `sessions` or `archived_sessions`, and cannot traverse symlinks. A missing selected file blocks refresh until restored or the policy is updated. Archive moves therefore require updating explicit paths. Unselected files are neither parsed nor monitored. Use this to choose a physical owner when multiple rollouts claim one session ID; selecting both still fails instead of silently merging or discarding history.
-
-An all-history policy is `{"mode":"all","redact":[]}`. Redaction replaces exact case-sensitive literal matches in message text with `[REDACTED]`, choosing the longest overlapping match. It does not scan for secrets, redact metadata, normalize Unicode, or support regular expressions. Review session IDs and working directories as well as text before sharing. Keep the policy owner-readable only because its literals may contain secrets. Up to 100 literals of 4096 characters each and a 1 MiB policy file are supported.
-
-Only selected sessions and redacted message text are indexed. Remote tool arguments cannot change this policy. A policy edit, invalid policy or missing policy blocks content retrieval until indexing succeeds; changes rebuild the selected corpus and invalidate old references. A failed rebuild leaves retrieval blocked. Removed text is inaccessible through the API, but this is not secure erasure of old SQLite pages, backups or prior client responses. `--all` deliberately replaces any previously selected policy when passed to a writer.
-
-Preview locally before connecting a client: run `index` with the chosen policy, inspect `status`, then `sessions` (continue its pagination until complete), `show` and `messages` for representative evidence. History can still contain secrets and private data in ordinary messages. Connecting an MCP client grants it access to the selected indexed user/assistant history. Returned text is explicitly identified as untrusted historical content and must not be treated as instructions.
-
-The parser is independent of storage and MCP. `src/parser.ts` owns Codex normalization; `src/history.ts` owns ingestion and retrieval; `src/response.ts` owns the shared serialized-result budget; `src/server.ts` owns the MCP contract and HTTP boundary; `src/cli.ts` owns local configuration. Tests exercise UTF-8 append boundaries, rollback, FTS reconciliation, archive movement, continuation, and actual MCP transport calls using synthetic data.
-
-Run the reproducible synthetic retrieval benchmark:
-
-```sh
 npm run benchmark -- --source test/fixtures --cases test/fixtures/retrieval-cases.json
+npm pack
 ```
 
-For a private benchmark, provide a fixed source snapshot and a JSON array of cases using the same schema: `id`, `question`, `query`, optional `repo`, and `expected` containing `session_id`, byte-position `message_id`, and the SHA-256 of the full normalized message text. Freeze questions and expected evidence before tuning. The runner rejects missing or changed expected evidence, measures a fresh database index, five unchanged scans and five searches per case, and checks exact expansion. It prints counts, timings and case ranks without message text or questions. Fresh-database timing does not imply a cold filesystem cache. The temporary database is removed on completion or ordinary failure.
+Tests use synthetic history and cover ingestion, crash recovery, policy boundaries, Unicode continuation and real MCP transports. Keep private rollouts, policies and databases out of Git. Please include a synthetic reproduction when reporting a bug through [GitHub Issues](https://github.com/lstpsche/coding-session-history-mcp/issues). Pull requests are welcome; run `npm run check` before submitting.
 
-Use `tmp/` for private snapshots, benchmark cases and reports; it is excluded from Git. Never put actual conversations in test fixtures. `npm test` builds the CLI before exercising child-process transport tests.
+## License
 
-Session titles/model metadata and opt-in tool output remain future work. Embeddings and generated summaries are intentionally absent until retrieval evidence justifies them.
-
-MCP tools advertise output schemas and return their complete result in `structuredContent`; the text block only points to that data. Clients must consume structured results (MCP 2025-06-18 or newer). Both the wrapper and data count toward the 64 KiB limit. CLI commands still print the complete JSON directly. Search uses lexical AND semantics: start with one to three distinctive terms, search separate topics separately, and remove terms or try synonyms when empty. Empty results alone do not establish absence.
+[MIT](LICENSE) © 2026 Nikita Shkoda.
 
 This project is independent and is not affiliated with or endorsed by OpenAI.

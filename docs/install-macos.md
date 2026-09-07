@@ -1,22 +1,15 @@
 # Install on macOS
 
-Use Node.js 24 or later. Build and validate the checkout, then create a private local package:
-
-```sh
-npm ci
-npm run check
-npm pack --dry-run
-npm pack --pack-destination /absolute/private/artifacts
-```
-
-The package contains compiled JavaScript, usage documentation and package metadata. It excludes source rollouts, databases, tests, temporary files and local policy. Registry publication is disabled. Install the tarball into a dedicated directory; npm installs the native SQLite dependency for the current Node runtime:
+Complete [installation and the first index](../README.md#install) first. This guide assumes the same shell variables: `csh_install`, `csh_cli`, `csh_data` and `csh_source`. To resume in another terminal, set them again:
 
 ```sh
 csh_install="$HOME/.local/share/coding-session-history-runtime"
-npm install --prefix "$csh_install" /absolute/private/artifacts/coding-session-history-mcp-0.1.0.tgz
+csh_cli="$csh_install/node_modules/coding-session-history-mcp/dist/cli.js"
+csh_data="$HOME/.local/share/coding-session-history-mcp"
+csh_source="${CODEX_HOME:-$HOME/.codex}"
 ```
 
-Choose a source and create an owner-readable policy using the [scope contract](../README.md). Use a dedicated private data directory. Index and preview before starting a service:
+Create an owner-readable policy using the [first-run instructions](../README.md#first-run). Use a dedicated private data directory. Index and preview before starting a service:
 
 ```sh
 csh_data="$HOME/.local/share/coding-session-history-mcp"
@@ -24,7 +17,7 @@ mkdir -p "$csh_data"
 chmod 700 "$csh_data"
 chmod 600 "$csh_data/policy.json"
 csh_cli="$csh_install/node_modules/coding-session-history-mcp/dist/cli.js"
-node "$csh_cli" index --source "$HOME/.codex" --policy "$csh_data/policy.json" --db "$csh_data/index.sqlite"
+node "$csh_cli" index --source "$csh_source" --policy "$csh_data/policy.json" --db "$csh_data/index.sqlite"
 node "$csh_cli" status --db "$csh_data/index.sqlite"
 node "$csh_cli" sessions --db "$csh_data/index.sqlite"
 ```
@@ -35,7 +28,7 @@ Generate and inspect the writer's LaunchAgent. The generator requires explicit s
 csh_agent="$HOME/Library/LaunchAgents/local.coding-session-history.writer.plist"
 mkdir -p "$HOME/Library/LaunchAgents"
 test ! -e "$csh_agent" && node "$csh_cli" launchd \
-  --source "$HOME/.codex" --policy "$csh_data/policy.json" \
+  --source "$csh_source" --policy "$csh_data/policy.json" \
   --db "$csh_data/index.sqlite" > "$csh_agent"
 chmod 600 "$csh_agent"
 plutil -lint "$csh_agent"
