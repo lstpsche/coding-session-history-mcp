@@ -1,0 +1,118 @@
+#!/usr/bin/env node
+import { parseArgs } from "node:util";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { History } from "./history.js";
+import { makeServer, serveHttp } from "./server.js";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
+
+async function main() {
+  const { values, positionals } = parseArgs({
+    allowPositionals: true,
+    options: {
+      source: { type: "string" },
+      db: { type: "string" },
+      repo: { type: "string" },
+      since: { type: "string" },
+      until: { type: "string" },
+      limit: { type: "string" },
+      after: { type: "string" },
+      "char-offset": { type: "string" },
+      port: { type: "string" },
+      http: { type: "boolean" },
+      help: { type: "boolean" },
+    },
+  });
+  const [command, argument] = positionals;
+  if (values.help || !command) {
+    console.log(
+      "coding-session-history index|status|search <query>|sessions|show <id>|serve [--http]\nOptions: --source <Codex home> --db <path> --repo <exact cwd> --since <ISO timestamp> --until <ISO timestamp> --limit <n> --after <message id> --char-offset <n> --port <n>\nHTTP requires CSH_TOKEN (at least 32 characters) and binds to 127.0.0.1. Run index explicitly to refresh.",
+    );
+    return;
+  }
+  if (
+    !["index", "status", "search", "sessions", "show", "serve"].includes(
+      command,
+    )
+  )
+    throw new Error(`Unknown command: ${command}`);
+  const history = new History(
+    values.db ??
+      join(homedir(), ".local/share/coding-session-history-mcp/index.sqlite"),
+  );
+  const input = {
+    repo: values.repo,
+    since: values.since,
+    until: values.until,
+    limit: values.limit === undefined ? undefined : Number(values.limit),
+  };
+  let serving = false;
+  try {
+    let output: unknown;
+    switch (command) {
+      case "index":
+        output = history.index(
+          values.source ?? process.env.CODEX_HOME ?? join(homedir(), ".codex"),
+        );
+        break;
+      case "status":
+        output = history.status();
+        break;
+      case "search":
+        output = history.search({ ...input, query: argument });
+        break;
+      case "sessions":
+        output = history.list(input);
+        break;
+      case "show":
+        output = history.messages({
+          session_id: argument,
+          limit: input.limit,
+          after: values.after === undefined ? undefined : Number(values.after),
+          char_offset:
+            values["char-offset"] === undefined
+              ? undefined
+              : Number(values["char-offset"]),
+        });
+        break;
+      case "serve": {
+        const port = Number(values.port ?? 7432);
+        if (!Number.isInteger(port) || port < 1 || port > 65535)
+          throw new Error("port must be between 1 and 65535");
+        const service = values.http
+          ? await serveHttp(history, process.env.CSH_TOKEN ?? "", port)
+          : serveStdio(() => makeServer(history));
+        serving = true;
+        let closing = false;
+        const shutdown = () => {
+          if (closing) return;
+          closing = true;
+          service
+            .close()
+            .catch((error: unknown) => {
+              console.error(
+                error instanceof Error ? error.message : "Shutdown failed",
+              );
+              process.exitCode = 1;
+            })
+            .finally(() => history.close());
+        };
+        process.once("SIGINT", () => {
+          shutdown();
+        });
+        process.once("SIGTERM", () => {
+          shutdown();
+        });
+        if (!values.http) process.stdin.once("end", shutdown);
+        return;
+      }
+    }
+    console.log(JSON.stringify(output, null, 2));
+  } finally {
+    if (!serving) history.close();
+  }
+}
+main().catch((error) => {
+  console.error(error instanceof Error ? error.message : "Unknown failure");
+  process.exitCode = 1;
+});

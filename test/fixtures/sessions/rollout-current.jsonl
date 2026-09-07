@@ -1,0 +1,16 @@
+{"timestamp": "2026-09-06T10:00:00Z", "type": "session_meta", "payload": {"id": "fixture-current", "session_id": "fixture-current", "cwd": "/example/project", "cli_version": "fixture", "git": {"branch": "main"}, "base_instructions": "EXCLUDED_BASE"}}
+{"timestamp": "2026-09-06T10:00:00Z", "type": "turn_context", "payload": {"cwd": "/example/project", "model": "fixture-model"}}
+{"timestamp": "2026-09-06T10:00:00Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "How should the local archive be searched?\nInclude café and Привет."}, {"type": "input_image", "image_url": "EXCLUDED_IMAGE"}]}}
+{"timestamp": "2026-09-06T10:00:00Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "channel": "final", "content": [{"type": "output_text", "text": "Use the lexical archive index.\nPreserve complete UTF-8 records: café, Привет, 🦀."}]}}
+{"timestamp": "2026-09-06T10:00:00Z", "type": "event_msg", "payload": {"type": "agent_message", "message": "EXCLUDED_DUPLICATE"}}
+{"timestamp": "2026-09-06T10:00:00Z", "type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "message", "role": "assistant", "content": "EXCLUDED_COMPLETED"}}}
+{"timestamp": "2026-09-06T10:00:00Z", "type": "response_item", "payload": {"type": "message", "role": "system", "content": [{"type": "input_text", "text": "EXCLUDED_SYSTEM"}]}}
+{"timestamp": "2026-09-06T10:00:00Z", "type": "response_item", "payload": {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "EXCLUDED_DEVELOPER"}]}}
+{"timestamp": "2026-09-06T10:00:00Z", "type": "response_item", "payload": {"type": "reasoning", "summary": [{"text": "EXCLUDED_REASONING"}]}}
+{"timestamp": "2026-09-06T10:00:00Z", "type": "response_item", "payload": {"type": "function_call", "name": "shell", "arguments": "EXCLUDED_ARGUMENTS"}}
+{"timestamp": "2026-09-06T10:00:00Z", "type": "response_item", "payload": {"type": "function_call_output", "call_id": "fixture-call", "output": "EXCLUDED_OUTPUT"}}
+{"timestamp": "2026-09-06T10:00:00Z", "type": "response_item", "payload": {"type": "custom_tool_call", "name": "shell", "input": "EXCLUDED_CUSTOM_INPUT"}}
+{"timestamp": "2026-09-06T10:00:00Z", "type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": "fixture-custom", "output": "EXCLUDED_CUSTOM_OUTPUT"}}
+{"timestamp": "2026-09-06T10:00:00Z", "type": "compacted", "payload": {"message": "EXCLUDED_COMPACTION"}}
+{"timestamp": "2026-09-06T10:00:00Z", "type": "future_event", "payload": {"text": "EXCLUDED_UNKNOWN"}}
+{"timestamp": "2026-09-06T10:00:00Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "future_content", "text": "EXCLUDED_UNKNOWN_BLOCK"}]}}

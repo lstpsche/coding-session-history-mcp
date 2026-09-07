@@ -1,0 +1,22 @@
+[
+  {
+    "id": "fixture-current",
+    "question": "How was lexical archive handled?",
+    "query": "lexical archive",
+    "expected": {
+      "session_id": "fixture-current",
+      "message_id": 669,
+      "sha256": "b67aeae9984be89a8a1d5f07f1886fafab4505b7c62900f4eda0231cf192498d"
+    }
+  },
+  {
+    "id": "fixture-archived",
+    "question": "How was renderer margin handled?",
+    "query": "renderer margin",
+    "expected": {
+      "session_id": "fixture-archived",
+      "message_id": 346,
+      "sha256": "9bc1b7f445c288771c58a1b20798460fb151b713e7c13d41a21f580542fe8a7c"
+    }
+  }
+]

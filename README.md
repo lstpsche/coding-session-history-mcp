@@ -1,0 +1,80 @@
+# Coding Session History
+
+A local, read-only MCP server for indexing and retrieving OpenAI Codex session history. TypeScript, SQLite FTS5, and the official MCP SDK. No external service receives history during indexing or search.
+
+Requires Node.js 24 or later and npm. Install and build:
+
+```sh
+npm ci
+npm run check
+```
+
+Run the CLI:
+
+```sh
+node dist/cli.js index
+node dist/cli.js status
+node dist/cli.js search "SQLite architecture"
+node dist/cli.js sessions --repo /absolute/recorded/working/directory
+node dist/cli.js show SESSION_ID
+```
+
+`index` reads `CODEX_HOME`, or `~/.codex`, and maintains a separate database at `~/.local/share/coding-session-history-mcp/index.sqlite`. Override these with `--source` and `--db`. The source is never modified. One database belongs to exactly one source root. Database files are created with owner-only permissions.
+
+Run `index` again to refresh. Unchanged files are skipped; appended files resume at the last committed newline. The whole reconciliation is transactional: malformed complete records or inaccessible sources fail the command without publishing partial updates. An unfinished trailing record waits for its newline. `status` reports the last successful indexing time and pending bytes for known sessions. Files with no complete metadata record are not yet indexed.
+
+Archiving and deletion are reconciled against both `sessions/` and `archived_sessions/`. These collections may be absent in an empty Codex home. Symlinks within collections are rejected. Replacements and truncations are reindexed. Append detection checks file identity, size, modification time, and a 4 KiB boundary digest; it assumes earlier bytes of an appended rollout are immutable. It is not a full-file tamper detector.
+
+For a local MCP client, configure:
+
+```json
+{
+  "mcpServers": {
+    "coding-session-history": {
+      "command": "node",
+      "args": ["/absolute/path/coding-session-history-mcp/dist/cli.js", "serve"]
+    }
+  }
+}
+```
+
+For HTTP, provide a private random bearer token of at least 32 characters through `CSH_TOKEN`, then run:
+
+```sh
+node dist/cli.js serve --http --port 7432
+```
+
+The endpoint is `http://127.0.0.1:7432/mcp`. Every request requires `Authorization: Bearer <token>`. The server binds only to loopback, validates Host, rejects browser Origin headers, and caps request bodies at 64 KiB. Stdio does not use the HTTP token. Tunnel installation, public hosting, OAuth, and ChatGPT connection setup are not included. Do not expose this endpoint publicly as-is.
+
+The four tools are:
+
+| Tool | Behavior |
+|---|---|
+| `codex_search` | AND search over literal lexical terms; up to 20 snippets of 1,500 characters |
+| `codex_list_sessions` | Up to 50 session metadata rows with offset pagination |
+| `codex_get_session` | Metadata and a bounded message page |
+| `codex_get_messages` | Explicit message expansion and continuation |
+
+`repo` matches the exact recorded session `cwd`, not an inferred Git root. Search date filters apply to messages; list date filters apply to the last indexed message. Dates require ISO timestamps with timezone. FTS5 BM25 scores sort ascending. Punctuation separates query terms; raw FTS syntax is not accepted.
+
+Message IDs are source byte positions within a session. They survive appends and archive moves; rewrites invalidate their meaning. To expand a search hit, pass `session_id` and `after: message_id - 1`. Message pages return up to 20 entries of 4,000 characters each. If `next` is present, pass its `after` and `char_offset` unchanged with the same session ID. Long messages are fully retrievable through continuation. Pagination describes the current index; refreshes can change results.
+
+Only `response_item` user and assistant text is indexed. Duplicate event messages, system/developer instructions, reasoning, images, and tool calls/outputs are excluded. Unknown event types are ignored; malformed supported records fail indexing with a source byte position. Records larger than 16 MiB are rejected. The local rollout format is an external, evolving contract. Legacy unwrapped records and repeated session metadata (including resumed or inherited histories) currently fail indexing. One such file aborts the entire reconciliation; do not assume a successful small sample qualifies the full history collection.
+
+History can still contain secrets and private data in ordinary messages. This implementation does not redact text or claim to detect secrets. Connecting an MCP client grants it access to the indexed user/assistant history. Returned text is explicitly identified as untrusted historical content and must not be treated as instructions.
+
+The parser is independent of storage and MCP. `src/parser.ts` owns Codex normalization; `src/history.ts` owns ingestion and retrieval; `src/server.ts` owns the MCP contract and HTTP boundary; `src/cli.ts` owns local configuration. Tests exercise UTF-8 append boundaries, rollback, FTS reconciliation, archive movement, continuation, and actual MCP transport calls using synthetic data.
+
+Run the reproducible synthetic retrieval benchmark:
+
+```sh
+npm run benchmark -- --source test/fixtures --cases test/fixtures/retrieval-cases.json
+```
+
+For a private benchmark, provide a fixed source snapshot and a JSON array of cases using the same schema: `id`, `question`, `query`, optional `repo`, and `expected` containing `session_id`, byte-position `message_id`, and the SHA-256 of the full normalized message text. Freeze questions and expected evidence before tuning. The runner rejects missing or changed expected evidence, measures a fresh database index, five unchanged scans and five searches per case, and checks exact expansion. It prints counts, timings and case ranks without message text or questions. Fresh-database timing does not imply a cold filesystem cache. The temporary database is removed on completion or ordinary failure.
+
+Use `tmp/` for private snapshots, benchmark cases and reports; it is excluded from Git. Never put actual conversations in test fixtures. `npm test` builds the CLI before exercising child-process transport tests.
+
+Automatic watching, session titles/model metadata, opt-in tool output, redaction, and remote-client setup remain future work. Embeddings and generated summaries are intentionally absent until retrieval evidence justifies them.
+
+This project is independent and is not affiliated with or endorsed by OpenAI.
