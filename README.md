@@ -9,6 +9,8 @@ npm ci
 npm run check
 ```
 
+For a packaged installation, upgrades and automatic startup, see [the macOS installation guide](docs/install-macos.md).
+
 Run the CLI:
 
 ```sh

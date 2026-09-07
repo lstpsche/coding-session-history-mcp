@@ -2,7 +2,9 @@
 import { z } from "zod";
 import { parseArgs } from "node:util";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { launchd } from "./launchd.js";
+import { policy } from "./policy.js";
+import { join, resolve } from "node:path";
 import { watch } from "./watch.js";
 import { History } from "./history.js";
 import { makeServer, serveHttp } from "./server.js";
@@ -37,7 +39,7 @@ async function main() {
   const [command, argument] = positionals;
   if (values.help || !command) {
     console.log(
-      "coding-session-history index|watch|status|search <query>|sessions|show <id>|messages <id>|serve [--http]\nOptions: --policy <JSON path> | --all (required for writers) --interval-ms <100..300000> --source <Codex home> --db <path> --repo <exact cwd> --since <ISO timestamp> --until <ISO timestamp> --limit <n> --after <message id> --revision <id> --message-id <n> --before <n> --through <n> --byte-offset <n> --offset <n> --corpus-revision <id> --port <n>\nHTTP requires CSH_TOKEN (at least 32 characters) and binds to 127.0.0.1. Run index explicitly to refresh.",
+      "coding-session-history index|watch|launchd|status|search <query>|sessions|show <id>|messages <id>|serve [--http]\nOptions: --policy <JSON path> | --all (required for writers) --interval-ms <100..300000> --source <Codex home> --db <path> --repo <exact cwd> --since <ISO timestamp> --until <ISO timestamp> --limit <n> --after <message id> --revision <id> --message-id <n> --before <n> --through <n> --byte-offset <n> --offset <n> --corpus-revision <id> --port <n>\nHTTP requires CSH_TOKEN (at least 32 characters) and binds to 127.0.0.1. Run index explicitly to refresh.",
     );
     return;
   }
@@ -45,6 +47,7 @@ async function main() {
     ![
       "index",
       "watch",
+      "launchd",
       "status",
       "search",
       "sessions",
@@ -54,6 +57,19 @@ async function main() {
     ].includes(command)
   )
     throw new Error(`Unknown command: ${command}`);
+  if (command === "launchd") {
+    if (!values.policy || !values.source || !values.db || values.all)
+      throw new Error("launchd requires --source, --db and --policy");
+    policy(values.policy);
+    console.log(
+      launchd(
+        resolve(values.source),
+        resolve(values.db),
+        resolve(values.policy),
+      ),
+    );
+    return;
+  }
   if (
     (command === "index" || command === "watch") &&
     Boolean(values.policy) === Boolean(values.all)
