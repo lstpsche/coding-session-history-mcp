@@ -37,5 +37,6 @@
   "files": [
     "dist/*.js",
     "docs/*.md"
-  ]
+  ],
+  "license": "MIT"
 }
