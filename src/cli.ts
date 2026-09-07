@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { z } from "zod";
 import { parseArgs } from "node:util";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -39,6 +40,7 @@ async function main() {
   const history = new History(
     values.db ??
       join(homedir(), ".local/share/coding-session-history-mcp/index.sqlite"),
+    { readonly: command !== "index" },
   );
   const input = {
     repo: values.repo,
@@ -112,7 +114,28 @@ async function main() {
     if (!serving) history.close();
   }
 }
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : "Unknown failure");
+function describeFailure(error: unknown): string {
+  if (error instanceof SyntaxError)
+    return "Invalid JSON syntax (record content omitted)";
+  if (error instanceof z.ZodError)
+    return (
+      "Invalid record or argument schema: " +
+      error.issues
+        .map((issue) => `${issue.path.join(".")}: ${issue.code}`)
+        .join(", ")
+    );
+  if (!(error instanceof Error)) return "Non-Error failure";
+  const code =
+    "code" in error && typeof error.code === "string" ? ` [${error.code}]` : "";
+  return (
+    error.message +
+    code +
+    (error.cause === undefined
+      ? ""
+      : `; caused by: ${describeFailure(error.cause)}`)
+  );
+}
+main().catch((error: unknown) => {
+  console.error(describeFailure(error));
   process.exitCode = 1;
 });

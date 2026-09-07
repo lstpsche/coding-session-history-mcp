@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const PARSER_VERSION = 2;
+
 const envelope = z.object({
   timestamp: z.iso.datetime({ offset: true }),
   type: z.string(),
@@ -26,6 +28,15 @@ type Normalized =
 
 /** Only response_item messages are canonical; event_msg can repeat their contents. */
 export function normalize(raw: unknown): Normalized {
+  if (
+    typeof raw === "object" &&
+    raw !== null &&
+    "id" in raw &&
+    !("payload" in raw)
+  )
+    throw new Error(
+      "Unsupported legacy unwrapped rollout: message timestamps and cwd are unavailable",
+    );
   const event = envelope.parse(raw);
   const timestamp = new Date(event.timestamp).toISOString();
   if (event.type === "session_meta") {

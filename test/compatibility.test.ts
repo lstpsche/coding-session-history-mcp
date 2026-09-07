@@ -71,11 +71,6 @@ for (const [name, records, error] of [
     /Invalid rollout record/,
   ],
   [
-    "repeated same-session metadata",
-    Buffer.concat([current, first]),
-    /Unexpected session metadata/,
-  ],
-  [
     "different-session metadata in one file",
     Buffer.concat([
       current,
@@ -83,7 +78,7 @@ for (const [name, records, error] of [
         first.toString().replaceAll("fixture-current", "other-session"),
       ),
     ]),
-    /Unexpected session metadata/,
+    /Conflicting session metadata/,
   ],
   [
     "malformed supported message",

@@ -8,13 +8,15 @@ import {
   readdirSync,
   realpathSync,
   mkdirSync,
-  chmodSync,
+  fchmodSync,
+  lstatSync,
+  type Stats,
 } from "node:fs";
 import { dirname, join, resolve, relative, isAbsolute } from "node:path";
 import { createHash } from "node:crypto";
 import { TextDecoder } from "node:util";
 import { z } from "zod";
-import { normalize } from "./parser.js";
+import { normalize, PARSER_VERSION } from "./parser.js";
 
 const MAX_LINE = 16 * 1024 * 1024;
 const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -49,6 +51,7 @@ type FileState = {
   offset: number;
   size: number;
   mtime: number;
+  ctime: number;
   identity: string;
   session_id: string;
   anchor: string;
@@ -60,35 +63,126 @@ type Message = {
   timestamp: string;
 };
 
+const SCHEMA_VERSION = 2;
+
+function fingerprint(stat: Stats) {
+  return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+}
+
+/** Observe namespace and file metadata twice; never publish a detected concurrent change. */
+function observe(root: string) {
+  const files = new Map<string, string>();
+  const directories = new Map<string, string>();
+  const collections: string[] = [];
+  const walk = (dir: string) => {
+    const before = lstatSync(dir);
+    if (!before.isDirectory())
+      throw new Error(`Expected real directory: ${dir}`);
+    directories.set(dir, fingerprint(before));
+    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
+      a.name.localeCompare(b.name),
+    )) {
+      const path = join(dir, entry.name);
+      if (entry.isSymbolicLink())
+        throw new Error(`Symlink in history source: ${path}`);
+      if (entry.isDirectory()) walk(path);
+      else if (
+        entry.name.startsWith("rollout-") &&
+        entry.name.endsWith(".jsonl")
+      ) {
+        const stat = lstatSync(path);
+        if (!stat.isFile()) throw new Error(`Not a regular rollout: ${path}`);
+        files.set(path, fingerprint(stat));
+      }
+    }
+    if (fingerprint(lstatSync(dir)) !== fingerprint(before))
+      throw new Error(
+        `Source directory changed during discovery: ${dir}; retry index`,
+      );
+  };
+  const rootStat = lstatSync(root);
+  if (!rootStat.isDirectory())
+    throw new Error("Source root must be a real directory");
+  const entries = readdirSync(root);
+  for (const name of ["sessions", "archived_sessions"]) {
+    if (!entries.includes(name)) continue;
+    collections.push(name);
+    walk(join(root, name));
+  }
+  return {
+    files,
+    collections,
+    signature: JSON.stringify([
+      `${rootStat.dev}:${rootStat.ino}`,
+      [...directories],
+      [...files],
+    ]),
+  };
+}
+
 export class History {
   readonly db: Database.Database;
-  constructor(path: string) {
+  constructor(path: string, options: { readonly?: boolean } = {}) {
+    const readonly = options.readonly === true;
     if (path !== ":memory:") {
-      mkdirSync(dirname(resolve(path)), { recursive: true, mode: 0o700 });
-      const fd = openSync(
-        path,
-        constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW,
-        0o600,
-      );
-      closeSync(fd);
-      chmodSync(path, 0o600);
+      if (!readonly) {
+        mkdirSync(dirname(resolve(path)), { recursive: true, mode: 0o700 });
+        const fd = openSync(
+          path,
+          constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW,
+          0o600,
+        );
+        try {
+          if (!fstatSync(fd).isFile())
+            throw new Error("Index must be a regular file");
+          fchmodSync(fd, 0o600);
+        } finally {
+          closeSync(fd);
+        }
+      } else if (!lstatSync(path).isFile()) {
+        throw new Error(
+          "Index must be an existing regular file; run index first",
+        );
+      }
     }
-    this.db = new Database(path);
-    this.db.pragma("foreign_keys = ON");
-    this.db.pragma("busy_timeout = 5000");
-    const version = this.db.pragma("user_version", { simple: true });
-    if (version !== 0 && version !== 1)
-      throw new Error(`Unsupported index schema ${version}`);
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS source(root TEXT NOT NULL, indexed_at TEXT);
-      CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, cwd TEXT NOT NULL, started_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, offset INTEGER NOT NULL, size INTEGER NOT NULL, mtime REAL NOT NULL, identity TEXT NOT NULL, session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE, anchor TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, sequence INTEGER NOT NULL, timestamp TEXT NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL, UNIQUE(session_id, sequence));
-      CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(text, content='messages', content_rowid='id');
-      CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN INSERT INTO messages_fts(rowid,text) VALUES(new.id,new.text); END;
-      CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN INSERT INTO messages_fts(messages_fts,rowid,text) VALUES('delete',old.id,old.text); END;
-      PRAGMA user_version = 1;
+    this.db = new Database(path, { readonly, fileMustExist: readonly });
+    try {
+      this.db.pragma("foreign_keys = ON");
+      this.db.pragma("busy_timeout = 5000");
+      const version = this.db.pragma("user_version", { simple: true });
+      if (version === 0 && !readonly) {
+        if (this.db.prepare("SELECT name FROM sqlite_schema LIMIT 1").get())
+          throw new Error("Unrecognized database; choose a new --db path");
+        this.db.transaction(() => {
+          this.db.exec(`
+      CREATE TABLE source(root TEXT NOT NULL, indexed_at TEXT, collections TEXT NOT NULL);
+      CREATE TABLE sessions(id TEXT PRIMARY KEY, cwd TEXT NOT NULL, started_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE files(path TEXT PRIMARY KEY, offset INTEGER NOT NULL, size INTEGER NOT NULL, mtime REAL NOT NULL, ctime REAL NOT NULL, identity TEXT NOT NULL, session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE, anchor TEXT NOT NULL);
+      CREATE TABLE messages(id INTEGER PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, sequence INTEGER NOT NULL, timestamp TEXT NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL, UNIQUE(session_id, sequence));
+      CREATE VIRTUAL TABLE messages_fts USING fts5(text, content='messages', content_rowid='id');
+      CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN INSERT INTO messages_fts(rowid,text) VALUES(new.id,new.text); END;
+      CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN INSERT INTO messages_fts(messages_fts,rowid,text) VALUES('delete',old.id,old.text); END;
+      CREATE TABLE index_format(parser_version INTEGER NOT NULL);
+      INSERT INTO index_format VALUES(${PARSER_VERSION});
+      PRAGMA user_version = ${SCHEMA_VERSION};
     `);
+        })();
+      } else if (version !== SCHEMA_VERSION) {
+        throw new Error(
+          `Unsupported index schema ${String(version)}; rebuild with index --db <new-path>; existing data is unchanged`,
+        );
+      }
+      const format = this.db
+        .prepare("SELECT parser_version FROM index_format")
+        .get() as { parser_version: number } | undefined;
+      if (format?.parser_version !== PARSER_VERSION)
+        throw new Error(
+          "Incompatible index parser; rebuild with index --db <new-path>; existing data is unchanged",
+        );
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
   }
   close() {
     this.db.close();
@@ -97,58 +191,61 @@ export class History {
   /** Reconcile the complete configured source set atomically, including moves and deletions. */
   index(source: string) {
     const root = realpathSync(source);
-    const paths: string[] = [];
-    const walk = (dir: string) => {
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        const path = join(dir, entry.name);
-        if (entry.isSymbolicLink())
-          throw new Error(`Symlink in history source: ${path}`);
-        if (entry.isDirectory()) walk(path);
-        else if (
-          entry.isFile() &&
-          entry.name.startsWith("rollout-") &&
-          entry.name.endsWith(".jsonl")
-        )
-          paths.push(path);
-      }
-    };
-    // A configured root must exist; individual Codex history collections may not exist yet.
-    const entries = readdirSync(root, { withFileTypes: true });
-    for (const name of ["sessions", "archived_sessions"]) {
-      const entry = entries.find((item) => item.name === name);
-      if (!entry) continue;
-      if (!entry.isDirectory())
-        throw new Error(`${name} must be a real directory`);
-      walk(join(root, name));
-    }
+    if (this.db.readonly)
+      throw new Error("Cannot index through a read-only database connection");
+    const observation = observe(root);
+    const paths = [...observation.files.keys()];
     let changed = 0;
-    this.db.transaction(() => {
-      const configured = this.db.prepare("SELECT root FROM source").get() as
-        { root: string } | undefined;
-      if (configured && configured.root !== root)
-        throw new Error(
-          "Index belongs to another source root; choose a separate database",
-        );
-      if (!configured)
-        this.db.prepare("INSERT INTO source(root) VALUES(?)").run(root);
-      const current = new Set(paths);
-      for (const row of this.db
-        .prepare("SELECT * FROM files")
-        .all() as FileState[]) {
-        if (!current.has(row.path))
+    this.db
+      .transaction(() => {
+        const configured = this.db
+          .prepare("SELECT root, collections FROM source")
+          .get() as { root: string; collections: string } | undefined;
+        if (configured && configured.root !== root)
+          throw new Error(
+            "Index belongs to another source root; choose a separate database",
+          );
+        if (configured) {
+          const previous = z
+            .array(z.string())
+            .parse(JSON.parse(configured.collections));
+          for (const name of previous) {
+            if (!observation.collections.includes(name))
+              throw new Error(
+                `Previously observed collection disappeared: ${name}; restore it (an empty directory confirms intentional deletion) and retry index`,
+              );
+          }
+        } else
           this.db
-            .prepare("DELETE FROM sessions WHERE id=?")
-            .run(row.session_id);
-      }
-      for (const path of paths.sort()) if (this.ingest(path, root)) changed++;
-      this.db
-        .prepare("UPDATE source SET indexed_at=?")
-        .run(new Date().toISOString());
-    })();
+            .prepare("INSERT INTO source(root,collections) VALUES(?,?)")
+            .run(root, JSON.stringify(observation.collections));
+        const current = new Set(paths);
+        for (const row of this.db
+          .prepare("SELECT * FROM files")
+          .all() as FileState[]) {
+          if (!current.has(row.path))
+            this.db
+              .prepare("DELETE FROM sessions WHERE id=?")
+              .run(row.session_id);
+        }
+        for (const path of paths.sort())
+          if (this.ingest(path, root, observation.files.get(path)!)) changed++;
+        if (observe(root).signature !== observation.signature)
+          throw new Error(
+            "History source changed during indexing; retry index",
+          );
+        this.db
+          .prepare("UPDATE source SET indexed_at=?, collections=?")
+          .run(
+            new Date().toISOString(),
+            JSON.stringify(observation.collections),
+          );
+      })
+      .immediate();
     return { files: paths.length, changed, ...this.status() };
   }
 
-  private ingest(path: string, root: string): boolean {
+  private ingest(path: string, root: string, observed: string): boolean {
     const rel = relative(root, realpathSync(path));
     if (rel.startsWith("..") || isAbsolute(rel))
       throw new Error("Source escaped configured root");
@@ -156,6 +253,10 @@ export class History {
     try {
       const stat = fstatSync(fd);
       if (!stat.isFile()) throw new Error(`Not a regular rollout: ${path}`);
+      if (fingerprint(stat) !== observed)
+        throw new Error(
+          `Rollout changed after discovery: ${path}; retry index`,
+        );
       const identity = `${stat.dev}:${stat.ino}`;
       const old = this.db
         .prepare("SELECT * FROM files WHERE path=?")
@@ -164,7 +265,8 @@ export class History {
         old &&
         old.identity === identity &&
         old.size === stat.size &&
-        old.mtime === stat.mtimeMs
+        old.mtime === stat.mtimeMs &&
+        old.ctime === stat.ctimeMs
       )
         return false;
       const anchor = (offset: number) => {
@@ -218,9 +320,26 @@ export class History {
             });
           }
           if (event.kind === "session") {
-            if (sequence !== 0 || sessionId)
+            if (sessionId) {
+              const session = this.db
+                .prepare("SELECT cwd FROM sessions WHERE id=?")
+                .get(sessionId) as { cwd: string };
+              if (event.id !== sessionId || event.cwd !== session.cwd)
+                throw new Error(
+                  `Conflicting session metadata: ${path}:${sequence}; mixed ownership is unsupported`,
+                );
+              continue;
+            }
+            if (sequence !== 0)
               throw new Error(
                 `Unexpected session metadata: ${path}:${sequence}`,
+              );
+            const duplicate = this.db
+              .prepare("SELECT id FROM sessions WHERE id=?")
+              .get(event.id);
+            if (duplicate)
+              throw new Error(
+                `Duplicate session ID in source: ${path}; keep only one rollout copy`,
               );
             sessionId = event.id;
             this.db
@@ -253,22 +372,20 @@ export class History {
           throw new Error(`Rollout record exceeds ${MAX_LINE} bytes: ${path}`);
       }
       const after = fstatSync(fd);
-      if (
-        after.size < stat.size ||
-        (after.size === stat.size && after.mtimeMs !== stat.mtimeMs)
-      )
+      if (fingerprint(after) !== observed)
         throw new Error(`Rollout changed while indexing: ${path}`);
       if (!sessionId) {
         if (offset === 0) return false; // No complete record has been published yet.
         throw new Error(`Missing session metadata: ${path}`);
       }
       this.db
-        .prepare("INSERT OR REPLACE INTO files VALUES(?,?,?,?,?,?,?)")
+        .prepare("INSERT OR REPLACE INTO files VALUES(?,?,?,?,?,?,?,?)")
         .run(
           path,
           offset,
           stat.size,
           stat.mtimeMs,
+          stat.ctimeMs,
           identity,
           sessionId,
           anchor(offset),

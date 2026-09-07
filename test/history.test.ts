@@ -126,7 +126,7 @@ test("reject duplicate IDs, symlinks, missing roots and root switching", (t) => 
   writeFileSync(file, meta());
   history.index(root);
   writeFileSync(join(root, "sessions/rollout-copy.jsonl"), meta());
-  assert.throws(() => history.index(root), /UNIQUE/);
+  assert.throws(() => history.index(root), /Duplicate session ID/);
   rmSync(join(root, "sessions/rollout-copy.jsonl"));
   symlinkSync(file, join(root, "sessions/rollout-link.jsonl"));
   assert.throws(() => history.index(root), /Symlink/);
