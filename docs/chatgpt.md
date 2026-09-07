@@ -34,4 +34,8 @@ tunnel-client runtimes status coding-session-history --json
 
 Also revoke the connector or tunnel authorization in the relevant account settings when removing access. Confirm subsequent remote calls fail. Reconnection must still obey the local policy; transport credentials cannot widen the indexed corpus. Retain metadata-only evidence of discovery, exact reference expansion, disconnect and reconnect rather than recording private excerpts or keys.
 
+After disconnecting, reinstalling the existing plugin may not restore its account connection by itself. Open its detail page, choose **Install plugin**, then **Try in chat**. If the chat presents **Connect**, complete that connection flow and retry. An existing conversation can retain unavailable tool discovery; verify recovery with the plugin explicitly selected in a fresh chat. A successful installation badge alone is not proof that calls work.
+
+This server returns complete results in `structuredContent` with advertised output schemas. Confirm the client can read observation timestamps and expand returned references from that field. The text block is only a pointer. When updating the installed package, restart the tunnel runtime and refresh the plugin's tools if the client retains old definitions.
+
 For a synthetic local transport check without account credentials, the official client provides `dev proxy --mcp-command '...' --duration 60s --print-json`. This uses a local in-memory control plane. It is useful for stdio compatibility testing and does not exercise hosted ChatGPT or its authorization.
